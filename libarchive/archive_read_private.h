@@ -212,6 +212,17 @@ struct archive_read {
 	struct archive_format_descriptor	*format; /* Active format. */
 
 	/*
+	 * Slot (in formats[]) of the runner-up from the initial format
+	 * bidding, or -1 when no other format recognized the stream.
+	 * When several formats bid on the same stream and the winning
+	 * format fails to read the very first entry, this permits a
+	 * single, tightly-controlled fallback attempt with the
+	 * runner-up format; see read_header_format_fallback() in
+	 * archive_read.c.
+	 */
+	int		  fallback_format_slot;
+
+	/*
 	 * Various information needed by archive_extract.
 	 */
 	struct archive_read_extract		*extract;

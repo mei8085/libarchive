@@ -74,6 +74,8 @@ static int	_archive_read_next_header(struct archive *,
 		    struct archive_entry **);
 static int	_archive_read_next_header2(struct archive *,
 		    struct archive_entry *);
+static int	read_header_format_fallback(struct archive_read *,
+		    struct archive_entry *, int);
 static int64_t  advance_file_pointer(struct archive_read_filter *, int64_t);
 
 static const struct archive_vtable
@@ -110,6 +112,7 @@ archive_read_new(void)
 	}
 	a->archive.vtable = &archive_read_vtable;
 	a->entry_bytes_declared = -1;
+	a->fallback_format_slot = -1;
 
 	a->passphrases.last = &a->passphrases.first;
 
@@ -689,6 +692,24 @@ _archive_read_next_header2(struct archive *_a, struct archive_entry *entry)
 	r2 = (a->format->read_header)(a, entry);
 
 	/*
+	 * Controlled format fallback: if several formats recognized this
+	 * stream and the winning format failed to read the very first
+	 * entry, the runner-up format gets exactly one chance to read
+	 * it, but only while the stream can still be returned to the
+	 * position where the failed attempt started.  Once an entry has
+	 * been exposed to the client, the format choice is final.
+	 *
+	 * Only ARCHIVE_FATAL qualifies: it means the current format
+	 * cannot make sense of the stream at all.  ARCHIVE_FAILED is a
+	 * per-entry rejection with its own recovery semantics (the
+	 * client skips the entry and keeps reading with the same
+	 * format), so it must propagate unchanged.
+	 */
+	if (r2 == ARCHIVE_FATAL &&
+	    a->fallback_format_slot >= 0 && _a->file_count == 1)
+		r2 = read_header_format_fallback(a, entry, r2);
+
+	/*
 	 * EOF and FATAL are persistent at this layer.  By
 	 * modifying the state, we guarantee that future calls to
 	 * read a header or read data will fail.
@@ -746,6 +767,97 @@ _archive_read_next_header(struct archive *_a, struct archive_entry **entryp)
 	return ret;
 }
 
+/*
+ * Attempt a one-shot fallback to the runner-up format after the
+ * winning format failed to read the first entry of a stream that
+ * more than one format recognized during bidding.
+ *
+ * The retry is permitted only while nothing has been consumed that
+ * cannot be undone: the stream must still be at, or be seekable back
+ * to, the position where the failed header read started.  The
+ * fallback format parses the stream with its own full validation, so
+ * a corrupt or truncated header is never re-interpreted as another
+ * format's success; if the fallback also rejects the stream, the
+ * original format, stream position and error are restored so the
+ * failure is reported against the format that had the strongest
+ * claim on the input.
+ *
+ * Returns the status that should replace 'failure'.
+ */
+static int
+read_header_format_fallback(struct archive_read *a,
+    struct archive_entry *entry, int failure)
+{
+	struct archive_format_descriptor *primary;
+	struct archive_string saved_error;
+	const char *saved_format_name;
+	int saved_format, saved_errno;
+	int r;
+
+	primary = a->format;
+	saved_errno = archive_errno(&a->archive);
+	saved_format = a->archive.archive_format;
+	saved_format_name = a->archive.archive_format_name;
+	archive_string_init(&saved_error);
+	if (archive_error_string(&a->archive) != NULL)
+		archive_strcpy(&saved_error,
+		    archive_error_string(&a->archive));
+
+	/* The fallback may be attempted at most once. */
+	a->format = &(a->formats[a->fallback_format_slot]);
+	a->fallback_format_slot = -1;
+
+	/*
+	 * Refuse to retry if the failed attempt consumed input that
+	 * cannot be undone.
+	 */
+	if (a->filter->position != a->header_position &&
+	    __archive_read_seek(a, a->header_position, SEEK_SET) !=
+	    a->header_position) {
+		a->format = primary;
+		archive_string_free(&saved_error);
+		return (failure);
+	}
+
+	/*
+	 * Discard any partial metadata or format identity the failed
+	 * attempt may have announced; the fallback format establishes
+	 * its own while parsing.
+	 */
+	archive_entry_clear(entry);
+	archive_clear_error(&a->archive);
+	a->archive.archive_format = 0;
+	a->archive.archive_format_name = NULL;
+
+	r = (a->format->read_header)(a, entry);
+
+	if (r == ARCHIVE_FATAL || r == ARCHIVE_FAILED) {
+		/*
+		 * The runner-up rejected the stream as well.  Put back
+		 * the original format, position and error: the failure
+		 * is reported against the format with the strongest
+		 * claim, and the stream is left where the failed
+		 * header read began.
+		 */
+		a->format = primary;
+		a->archive.archive_format = saved_format;
+		a->archive.archive_format_name = saved_format_name;
+		if (a->filter->position != a->header_position)
+			__archive_read_seek(a, a->header_position,
+			    SEEK_SET);
+		if (saved_error.s != NULL)
+			archive_set_error(&a->archive, saved_errno,
+			    "%s", saved_error.s);
+		else
+			archive_clear_error(&a->archive);
+		archive_string_free(&saved_error);
+		return (failure);
+	}
+
+	archive_string_free(&saved_error);
+	return (r);
+}
+
 static int
 bid_format(struct archive_read *a, int best_bid)
 {
@@ -772,10 +884,13 @@ choose_format(struct archive_read *a)
 	int i;
 	int bid, best_bid;
 	int best_bid_slot;
+	int second_bid, second_bid_slot;
 
 	slots = sizeof(a->formats) / sizeof(a->formats[0]);
 	best_bid = -1;
 	best_bid_slot = -1;
+	second_bid = -1;
+	second_bid_slot = -1;
 
 	/* Set up a->format for convenience of bidders. */
 	a->format = &(a->formats[0]);
@@ -785,8 +900,20 @@ choose_format(struct archive_read *a)
 			if (bid == ARCHIVE_FATAL)
 				return (ARCHIVE_FATAL);
 			if ((bid > best_bid) || (best_bid_slot < 0)) {
+				/*
+				 * The previous leader is demoted to
+				 * runner-up, provided it actually
+				 * recognized the stream.
+				 */
+				if (best_bid > 0) {
+					second_bid = best_bid;
+					second_bid_slot = best_bid_slot;
+				}
 				best_bid = bid;
 				best_bid_slot = i;
+			} else if (bid > 0 && bid > second_bid) {
+				second_bid = bid;
+				second_bid_slot = i;
 			}
 		}
 	}
@@ -810,6 +937,13 @@ choose_format(struct archive_read *a)
 		    "Unrecognized archive format");
 		return (ARCHIVE_FATAL);
 	}
+
+	/*
+	 * Remember the runner-up (if any) so that the first header
+	 * read can make one controlled fallback attempt if the winning
+	 * format fails; see read_header_format_fallback().
+	 */
+	a->fallback_format_slot = second_bid_slot;
 
 	return (best_bid_slot);
 }

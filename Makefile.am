@@ -534,6 +534,7 @@ libarchive_test_SOURCES= \
 	libarchive/test/test_read_format_cpio_svr4c_Z.c \
 	libarchive/test/test_read_format_cpio_symlink_trailer.c \
 	libarchive/test/test_read_format_empty.c \
+	libarchive/test/test_read_format_fallback.c \
 	libarchive/test/test_read_format_gtar_filename.c \
 	libarchive/test/test_read_format_gtar_gz.c \
 	libarchive/test/test_read_format_gtar_lzma.c \
