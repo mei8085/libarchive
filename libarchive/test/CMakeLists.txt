@@ -314,6 +314,7 @@ IF(ENABLE_TEST)
     test_write_disk_secure744.c
     test_write_disk_secure745.c
     test_write_disk_secure746.c
+    test_write_disk_secure_extraction.c
     test_write_disk_sparse.c
     test_write_disk_symlink.c
     test_write_disk_times.c
