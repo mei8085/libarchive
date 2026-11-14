@@ -573,14 +573,43 @@ archive_read_format_tar_read_header(struct archive_read *a,
 		struct sparse_block *sb;
 		size_t added = 0;
 		int count;
+		int64_t end = 0;
+		int64_t data_offset = -1, data_end = -1;
 
 		for (sb = tar->sparse_list; sb != NULL; sb = sb->next) {
+			/*
+			 * Sparse entries must be sorted, non-overlapping
+			 * and must not extend past the logical file size.
+			 */
+			if (sb->offset < end ||
+			    sb->remaining > tar->disk_size - sb->offset) {
+				archive_set_error(&a->archive, ARCHIVE_ERRNO_MISC,
+				    "Malformed sparse map data");
+				return (ARCHIVE_FATAL);
+			}
+			end = sb->offset + sb->remaining;
 			if (!sb->hole) {
+				/*
+				 * Adjacent data blocks are merged into a
+				 * single entry by
+				 * archive_entry_sparse_add_entry().
+				 */
+				if (sb->offset != data_end)
+					added++;
+				if (data_end < 0)
+					data_offset = sb->offset;
+				data_end = sb->offset + sb->remaining;
 				archive_entry_sparse_add_entry(entry,
 				    sb->offset, sb->remaining);
-				added++;
 			}
 		}
+		/*
+		 * archive_entry_sparse_count() reports zero entries if a
+		 * single block covers the entire file contents.
+		 */
+		if (added == 1 && data_offset == 0 &&
+		    data_end >= tar->disk_size)
+			added = 0;
 		count = archive_entry_sparse_count(entry);
 		if (count < 0 || (size_t)count != added) {
 			archive_set_error(&a->archive, ARCHIVE_ERRNO_MISC,
@@ -2566,6 +2595,12 @@ pax_attribute(struct archive_read *a, struct tar *tar, struct archive_entry *ent
 							return (ARCHIVE_FATAL);
 						}
 						if (gnu_sparse_01_parse(a, tar, p, value_length) != ARCHIVE_OK) {
+							/*
+							 * Reject the entire map; a
+							 * partially parsed one must
+							 * not be left behind.
+							 */
+							gnu_clear_sparse_list(tar);
 							err = ARCHIVE_WARN;
 						}
 					}
@@ -2849,6 +2884,12 @@ pax_attribute(struct archive_read *a, struct tar *tar, struct archive_entry *ent
 					}
 					err = pax_attribute_SUN_holesdata(a, tar, entry, p, value_length);
 					if (err < ARCHIVE_OK) {
+						/*
+						 * Reject the entire map; a
+						 * partially parsed one must
+						 * not be left behind.
+						 */
+						gnu_clear_sparse_list(tar);
 						archive_set_error(&a->archive,
 								  ARCHIVE_ERRNO_MISC,
 								  "Parse error: SUN.holesdata");
@@ -3250,6 +3291,17 @@ gnu_add_sparse_entry(struct archive_read *a, struct tar *tar,
 		archive_set_error(&a->archive, ARCHIVE_ERRNO_MISC, "Malformed sparse map data");
 		return (ARCHIVE_FATAL);
 	}
+	/*
+	 * Sparse entries must be sorted in ascending order and must not
+	 * overlap.  Adjacent entries are permitted.  The end of the
+	 * previous entry cannot overflow, as it was validated when that
+	 * entry was added.
+	 */
+	if (tar->sparse_last != NULL &&
+	    offset < tar->sparse_last->offset + tar->sparse_last->remaining) {
+		archive_set_error(&a->archive, ARCHIVE_ERRNO_MISC, "Malformed sparse map data");
+		return (ARCHIVE_FATAL);
+	}
 	p = calloc(1, sizeof(*p));
 	if (p == NULL) {
 		archive_set_error(&a->archive, ENOMEM, "Out of memory");
@@ -3551,6 +3603,9 @@ pax_attribute_SUN_holesdata(struct archive_read *a, struct tar *tar,
 		start = end;
 		end = tar_atol10(p, e - p);
 		if (end < 0)
+			return (ARCHIVE_WARN);
+		if (end < start)
+			/* Interval boundaries must not go backwards. */
 			return (ARCHIVE_WARN);
 		if (start < end) {
 			if (gnu_add_sparse_entry(a, tar, start,

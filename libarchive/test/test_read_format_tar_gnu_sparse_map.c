@@ -73,3 +73,155 @@ DEFINE_TEST(test_read_format_tar_gnu_sparse_map)
 	/* "x": not a number. */
 	test_malformed_map("test_read_format_tar_gnu_sparse_map_invalid.tar");
 }
+
+/*
+ * This archive holds a pax entry "file" with GNU.sparse.size=4, the
+ * map "0,1,x" and the four data bytes "ABCD".  The map parses one
+ * valid entry before failing.  The entire map must be rejected with a
+ * warning: no partially parsed sparse block may be left behind, and
+ * the entry is then read as a regular file.
+ */
+DEFINE_TEST(test_read_format_tar_gnu_sparse_map_partial)
+{
+	const char *refname = "test_read_format_tar_gnu_sparse_map_partial.tar";
+	struct archive_entry *ae;
+	struct archive *a;
+	char buff[16];
+
+	extract_reference_file(refname);
+	assert((a = archive_read_new()) != NULL);
+	assertEqualIntA(a, ARCHIVE_OK, archive_read_support_filter_all(a));
+	assertEqualIntA(a, ARCHIVE_OK, archive_read_support_format_all(a));
+	assertEqualIntA(a, ARCHIVE_OK,
+	    archive_read_open_filename(a, refname, 10240));
+
+	assertEqualIntA(a, ARCHIVE_WARN, archive_read_next_header(a, &ae));
+	failure("the warning must have a message");
+	assert(archive_error_string(a) != NULL);
+	if (archive_error_string(a) != NULL)
+		assertEqualString("Malformed sparse map data",
+		    archive_error_string(a));
+	assertEqualString("file", archive_entry_pathname(ae));
+	assertEqualInt(4, archive_entry_size(ae));
+
+	/* The rejected map must not leave a sparse block behind. */
+	assertEqualInt(0, archive_entry_sparse_count(ae));
+	assertEqualInt(4, archive_read_data(a, buff, sizeof(buff)));
+	assertEqualMem("ABCD", buff, 4);
+
+	assertEqualIntA(a, ARCHIVE_EOF, archive_read_next_header(a, &ae));
+	assertEqualIntA(a, ARCHIVE_OK, archive_read_close(a));
+	assertEqualInt(ARCHIVE_OK, archive_read_free(a));
+}
+
+/*
+ * This archive holds a pax entry "file" with GNU.sparse.size=4, the
+ * map "0,1,1,1,3,1" and the three data bytes "ABD".  Adjacent data
+ * segments are legal and must be restored at their declared offsets:
+ * "AB" at offset 0 and "D" at offset 3, with a hole in between.
+ */
+DEFINE_TEST(test_read_format_tar_gnu_sparse_map_adjacent)
+{
+	const char *refname =
+	    "test_read_format_tar_gnu_sparse_map_adjacent.tar";
+	struct archive_entry *ae;
+	struct archive *a;
+	const void *buff;
+	size_t size;
+	int64_t offset;
+
+	extract_reference_file(refname);
+	assert((a = archive_read_new()) != NULL);
+	assertEqualIntA(a, ARCHIVE_OK, archive_read_support_filter_all(a));
+	assertEqualIntA(a, ARCHIVE_OK, archive_read_support_format_all(a));
+	assertEqualIntA(a, ARCHIVE_OK,
+	    archive_read_open_filename(a, refname, 10240));
+
+	assertEqualIntA(a, ARCHIVE_OK, archive_read_next_header(a, &ae));
+	assertEqualString("file", archive_entry_pathname(ae));
+	assertEqualInt(4, archive_entry_size(ae));
+
+	/* The two adjacent segments are merged into a single one. */
+	assertEqualInt(2, archive_entry_sparse_count(ae));
+	archive_entry_sparse_reset(ae);
+	{
+		la_int64_t spo, spl;
+
+		assertEqualInt(ARCHIVE_OK,
+		    archive_entry_sparse_next(ae, &spo, &spl));
+		assertEqualInt(0, spo);
+		assertEqualInt(2, spl);
+		assertEqualInt(ARCHIVE_OK,
+		    archive_entry_sparse_next(ae, &spo, &spl));
+		assertEqualInt(3, spo);
+		assertEqualInt(1, spl);
+	}
+
+	/* Data is restored at the declared offsets. */
+	assertEqualIntA(a, ARCHIVE_OK,
+	    archive_read_data_block(a, &buff, &size, &offset));
+	assertEqualInt(0, offset);
+	assertEqualInt(1, size);
+	assertEqualMem("A", buff, 1);
+	assertEqualIntA(a, ARCHIVE_OK,
+	    archive_read_data_block(a, &buff, &size, &offset));
+	assertEqualInt(1, offset);
+	assertEqualInt(1, size);
+	assertEqualMem("B", buff, 1);
+	assertEqualIntA(a, ARCHIVE_OK,
+	    archive_read_data_block(a, &buff, &size, &offset));
+	assertEqualInt(3, offset);
+	assertEqualInt(1, size);
+	assertEqualMem("D", buff, 1);
+	assertEqualIntA(a, ARCHIVE_EOF,
+	    archive_read_data_block(a, &buff, &size, &offset));
+
+	assertEqualIntA(a, ARCHIVE_EOF, archive_read_next_header(a, &ae));
+	assertEqualIntA(a, ARCHIVE_OK, archive_read_close(a));
+	assertEqualInt(ARCHIVE_OK, archive_read_free(a));
+}
+
+/*
+ * This archive holds a pax entry "file" with GNU.sparse.size=4, the
+ * overlapping map "0,2,1,2" and the four data bytes "ABCD", followed
+ * by a regular entry "good" holding "hello".  The overlapping map is
+ * rejected with a warning and the entry is read as a regular file;
+ * the next entry must still be read correctly.
+ */
+DEFINE_TEST(test_read_format_tar_gnu_sparse_map_next)
+{
+	const char *refname = "test_read_format_tar_gnu_sparse_map_next.tar";
+	struct archive_entry *ae;
+	struct archive *a;
+	char buff[16];
+
+	extract_reference_file(refname);
+	assert((a = archive_read_new()) != NULL);
+	assertEqualIntA(a, ARCHIVE_OK, archive_read_support_filter_all(a));
+	assertEqualIntA(a, ARCHIVE_OK, archive_read_support_format_all(a));
+	assertEqualIntA(a, ARCHIVE_OK,
+	    archive_read_open_filename(a, refname, 10240));
+
+	assertEqualIntA(a, ARCHIVE_WARN, archive_read_next_header(a, &ae));
+	failure("the warning must have a message");
+	assert(archive_error_string(a) != NULL);
+	if (archive_error_string(a) != NULL)
+		assertEqualString("Malformed sparse map data",
+		    archive_error_string(a));
+	assertEqualString("file", archive_entry_pathname(ae));
+	assertEqualInt(4, archive_entry_size(ae));
+	assertEqualInt(0, archive_entry_sparse_count(ae));
+	assertEqualInt(4, archive_read_data(a, buff, sizeof(buff)));
+	assertEqualMem("ABCD", buff, 4);
+
+	/* The entry after the failed one is read correctly. */
+	assertEqualIntA(a, ARCHIVE_OK, archive_read_next_header(a, &ae));
+	assertEqualString("good", archive_entry_pathname(ae));
+	assertEqualInt(5, archive_entry_size(ae));
+	assertEqualInt(5, archive_read_data(a, buff, sizeof(buff)));
+	assertEqualMem("hello", buff, 5);
+
+	assertEqualIntA(a, ARCHIVE_EOF, archive_read_next_header(a, &ae));
+	assertEqualIntA(a, ARCHIVE_OK, archive_read_close(a));
+	assertEqualInt(ARCHIVE_OK, archive_read_free(a));
+}

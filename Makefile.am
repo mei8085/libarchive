@@ -1186,7 +1186,10 @@ libarchive_test_EXTRA_DIST=\
 	libarchive/test/test_read_format_tar_empty_pax.tar.Z.uu \
 	libarchive/test/test_read_format_tar_filename_koi8r.tar.Z.uu \
 	libarchive/test/test_read_format_tar_gnu_sparse_map_invalid.tar.uu \
+	libarchive/test/test_read_format_tar_gnu_sparse_map_adjacent.tar.uu \
+	libarchive/test/test_read_format_tar_gnu_sparse_map_next.tar.uu \
 	libarchive/test/test_read_format_tar_gnu_sparse_map_overflow.tar.uu \
+	libarchive/test/test_read_format_tar_gnu_sparse_map_partial.tar.uu \
 	libarchive/test/test_read_format_tar_invalid_pax_size.tar.uu \
 	libarchive/test/test_read_format_tar_mac_metadata_1.tar.uu \
 	libarchive/test/test_read_format_tar_pax_g_large.tar.uu \
