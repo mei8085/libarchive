@@ -645,9 +645,15 @@ uudecode_filter_close(struct archive_read_filter *f)
 {
 	struct uu *uu = f->data;
 
+	if (uu == NULL)
+		return (ARCHIVE_OK);
+
 	free(uu->out_buff);
+	uu->out_buff = NULL;
 	free(uu->name);
+	uu->name = NULL;
 	free(uu);
+	f->data = NULL;
 
 	return (ARCHIVE_OK);
 }

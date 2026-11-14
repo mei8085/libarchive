@@ -481,6 +481,12 @@ xz_lzma_bidder_init(struct archive_read_filter *f)
 		return (ARCHIVE_FATAL);
 	}
 
+	/*
+	 * Publish the state before initializing liblzma.  If decoder
+	 * setup below fails, the common filter teardown calls
+	 * xz_filter_close() exactly once to release it; we must not free
+	 * anything here, or that later close would double-free.
+	 */
 	f->data = xz;
 	xz->out_block_size = out_block_size;
 	xz->out_block = out_block;
@@ -515,13 +521,10 @@ xz_lzma_bidder_init(struct archive_read_filter *f)
 	if (ret == LZMA_OK)
 		return (ARCHIVE_OK);
 
-	/* Library setup failed: Choose an error message and clean up. */
+	/* Library setup failed: Choose an error message.  The state stays
+	 * attached to the filter and is released by xz_filter_close() when
+	 * the pipeline is torn down. */
 	set_error(f, ret);
-
-	free(xz->out_block);
-	free(xz);
-	f->data = NULL;
-	f->vtable = NULL;
 	return (ARCHIVE_FATAL);
 }
 
@@ -726,15 +729,29 @@ xz_filter_read(struct archive_read_filter *f, const void **p)
 
 /*
  * Clean up the decompressor.
+ *
+ * This runs at most once for a filter (the core clears the vtable
+ * afterwards) and must tolerate a partially initialized state, which
+ * happens when probing or a previous layer failed mid-initialization.
  */
 static int
 xz_filter_close(struct archive_read_filter *f)
 {
 	struct xz *xz = f->data;
 
+	if (xz == NULL)
+		return (ARCHIVE_OK);
+
+	/*
+	 * lzma_end() is safe on a zero-initialized stream and also on a
+	 * decoder that was already reset between lzip members, so call
+	 * it unconditionally rather than tracking every init state.
+	 */
 	lzma_end(&(xz->stream));
 	free(xz->out_block);
+	xz->out_block = NULL;
 	free(xz);
+	f->data = NULL;
 	return (ARCHIVE_OK);
 }
 

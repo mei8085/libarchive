@@ -493,12 +493,17 @@ program_filter_close(struct archive_read_filter *f)
 	struct program *program = f->data;
 	int e;
 
+	if (program == NULL)
+		return (ARCHIVE_OK);
+
 	e = child_stop(f, program);
 
 	/* Release our private data. */
 	free(program->out_buf);
+	program->out_buf = NULL;
 	archive_string_free(&program->description);
 	free(program);
+	f->data = NULL;
 
 	return (e);
 }

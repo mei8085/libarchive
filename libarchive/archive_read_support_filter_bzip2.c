@@ -339,6 +339,9 @@ bzip2_filter_close(struct archive_read_filter *f)
 	struct bzip2 *bzip2 = f->data;
 	int ret = ARCHIVE_OK;
 
+	if (bzip2 == NULL)
+		return (ret);
+
 	if (bzip2->valid) {
 		switch (BZ2_bzDecompressEnd(&bzip2->stream)) {
 		case BZ_OK:
@@ -353,7 +356,9 @@ bzip2_filter_close(struct archive_read_filter *f)
 	}
 
 	free(bzip2->out_block);
+	bzip2->out_block = NULL;
 	free(bzip2);
+	f->data = NULL;
 	return (ret);
 }
 

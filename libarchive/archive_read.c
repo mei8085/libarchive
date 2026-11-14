@@ -534,12 +534,14 @@ archive_read_open1(struct archive *_a)
 				archive_set_error(&a->archive,
 				    ARCHIVE_ERRNO_FILE_FORMAT,
 				    "Registered filter does not match");
+				__archive_read_filter_mark_fatal(a->filter);
 				close_filters(a);
 				a->archive.state = ARCHIVE_STATE_FATAL;
 				return (ARCHIVE_FATAL);
 			}
 			r = (bidder->vtable->init)(f2);
 			if (r != ARCHIVE_OK) {
+				__archive_read_filter_mark_fatal(a->filter);
 				close_filters(a);
 				a->archive.state = ARCHIVE_STATE_FATAL;
 				return (ARCHIVE_FATAL);
@@ -551,6 +553,7 @@ archive_read_open1(struct archive *_a)
 	{
 		slot = choose_format(a);
 		if (slot < 0) {
+			__archive_read_filter_mark_fatal(a->filter);
 			close_filters(a);
 			a->archive.state = ARCHIVE_STATE_FATAL;
 			return (ARCHIVE_FATAL);
@@ -563,6 +566,7 @@ archive_read_open1(struct archive *_a)
 			archive_set_error(&a->archive,
 			    ARCHIVE_ERRNO_FILE_FORMAT,
 			    "Registered format does not match");
+			__archive_read_filter_mark_fatal(a->filter);
 			close_filters(a);
 			a->archive.state = ARCHIVE_STATE_FATAL;
 			return (ARCHIVE_FATAL);
@@ -580,7 +584,13 @@ archive_read_open1(struct archive *_a)
  * building the pipeline.
  */
 
-/* We won't build a filter pipeline with more stages than this. */
+/*
+ * The maximum number of compression filters that may be stacked on
+ * top of the client "none" filter.  Inputs that would require a deeper
+ * chain of nested compression streams are rejected outright so that
+ * probing cannot keep allocating filters (and decoder state) without
+ * bound.
+ */
 #define MAX_NUMBER_FILTERS 25
 
 static int
@@ -592,7 +602,8 @@ choose_filters(struct archive_read *a)
 	ssize_t avail;
 	int r;
 
-	for (number_filters = 0; number_filters < MAX_NUMBER_FILTERS; ++number_filters) {
+	for (number_filters = 0; number_filters < MAX_NUMBER_FILTERS;
+	    ++number_filters) {
 		number_bidders = sizeof(a->bidders) / sizeof(a->bidders[0]);
 
 		best_bid = 0;
@@ -621,21 +632,52 @@ choose_filters(struct archive_read *a)
 		}
 
 		f = calloc(1, sizeof(*f));
-		if (f == NULL)
+		if (f == NULL) {
+			archive_set_error(&a->archive, ENOMEM,
+			    "Can't allocate data for filter");
+			__archive_read_free_filters(a);
 			return (ARCHIVE_FATAL);
+		}
 		f->bidder = best_bidder;
 		f->archive = a;
 		f->upstream = a->filter;
 		a->filter = f;
 		r = (best_bidder->vtable->init)(a->filter);
 		if (r != ARCHIVE_OK) {
+			/*
+			 * The init function owns only the resources it
+			 * fully created itself.  Tear down the whole
+			 * chain exactly once through the common path;
+			 * every layer that was initialized releases its
+			 * own resources there.
+			 */
+			__archive_read_filter_mark_fatal(f);
 			__archive_read_free_filters(a);
 			return (ARCHIVE_FATAL);
 		}
 	}
 	archive_set_error(&a->archive, ARCHIVE_ERRNO_FILE_FORMAT,
 	    "Input requires too many filters for decoding");
+	/* Stop probing and release everything that was established. */
+	__archive_read_filter_mark_fatal(a->filter);
+	__archive_read_free_filters(a);
 	return (ARCHIVE_FATAL);
+}
+
+/*
+ * Flag a filter, and every filter beneath it in the pipeline, as
+ * fatally failed.  Filter reads and seeks consult this flag, so a
+ * layer that has reported a failure can never be driven again.  This
+ * keeps malformed input in one layer from causing another layer to
+ * touch decoder state that is already being torn down.
+ */
+void
+__archive_read_filter_mark_fatal(struct archive_read_filter *f)
+{
+	while (f != NULL) {
+		f->fatal = 1;
+		f = f->upstream;
+	}
 }
 
 int
@@ -1089,6 +1131,15 @@ close_filters(struct archive_read *a)
 			if (r1 < r)
 				r = r1;
 		}
+		/*
+		 * Drop the decoder state and callbacks now.  The filter
+		 * object itself stays allocated until the matching
+		 * __archive_read_free_filters() call, but no further
+		 * read, seek or close may reach a layer that has already
+		 * released its resources.
+		 */
+		f->vtable = NULL;
+		f->data = NULL;
 		free(f->buffer);
 		f->buffer = NULL;
 		f = t;
@@ -1398,12 +1449,21 @@ read_client_data(struct archive_read_filter *f)
 
 	if (f->end_of_file)
 		return (0);
+	if (f->fatal)
+		return (ARCHIVE_FATAL);
 
 	bytes_read = (f->vtable->read)(f, &f->client_buff);
 	if (bytes_read < 0) {
 		f->client_total = f->client_avail = 0;
 		f->client_next = f->client_buff = NULL;
-		f->fatal = 1;
+		/*
+		 * A layer below us could not decode its input.  Mark the
+		 * whole remaining chain as failed so that no caller can
+		 * keep pulling from (or seeking through) a filter whose
+		 * decoder state is no longer usable; teardown then runs
+		 * exactly once via close_filters().
+		 */
+		__archive_read_filter_mark_fatal(f);
 	} else if (bytes_read == 0) {
 		f->client_total = f->client_avail = 0;
 		f->client_next = f->client_buff = NULL;
@@ -1447,7 +1507,7 @@ __archive_read_filter_ahead(struct archive_read_filter *f,
 	ssize_t bytes_read;
 	size_t min, tocopy;
 
-	if (f->fatal) {
+	if (f->fatal || f->closed) {
 		if (avail)
 			*avail = ARCHIVE_FATAL;
 		return (NULL);
@@ -1629,7 +1689,7 @@ advance_file_pointer(struct archive_read_filter *f, int64_t request)
 {
 	int64_t total_bytes_skipped = 0;
 
-	if (f->fatal)
+	if (f->fatal || f->closed)
 		return (-1);
 
 	/* Use up the copy buffer first. */

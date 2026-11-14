@@ -485,8 +485,13 @@ lzop_filter_close(struct archive_read_filter *f)
 {
 	struct lzop *lzop = f->data;
 
+	if (lzop == NULL)
+		return (ARCHIVE_OK);
+
 	free(lzop->out_block);
+	lzop->out_block = NULL;
 	free(lzop);
+	f->data = NULL;
 	return (ARCHIVE_OK);
 }
 

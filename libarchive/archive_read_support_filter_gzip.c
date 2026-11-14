@@ -512,6 +512,10 @@ gzip_filter_read(struct archive_read_filter *f, const void **p)
 
 /*
  * Clean up the decompressor.
+ *
+ * This runs at most once for a filter (the core clears the vtable
+ * afterwards) and must tolerate a partially initialized state, which
+ * happens when probing or a previous layer failed mid-initialization.
  */
 static int
 gzip_filter_close(struct archive_read_filter *f)
@@ -520,6 +524,9 @@ gzip_filter_close(struct archive_read_filter *f)
 	int ret;
 
 	ret = ARCHIVE_OK;
+
+	if (gzip == NULL)
+		return (ret);
 
 	if (gzip->in_stream) {
 		switch (inflateEnd(&(gzip->stream))) {
@@ -531,11 +538,15 @@ gzip_filter_close(struct archive_read_filter *f)
 			    "Failed to clean up gzip compressor");
 			ret = ARCHIVE_FATAL;
 		}
+		gzip->in_stream = 0;
 	}
 
 	free(gzip->name);
+	gzip->name = NULL;
 	free(gzip->out_block);
+	gzip->out_block = NULL;
 	free(gzip);
+	f->data = NULL;
 	return (ret);
 }
 

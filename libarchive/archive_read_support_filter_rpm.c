@@ -242,7 +242,11 @@ rpm_filter_close(struct archive_read_filter *f)
 {
 	struct rpm *rpm = f->data;
 
+	if (rpm == NULL)
+		return (ARCHIVE_OK);
+
 	free(rpm);
+	f->data = NULL;
 
 	return (ARCHIVE_OK);
 }

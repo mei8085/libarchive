@@ -816,9 +816,15 @@ lz4_filter_close(struct archive_read_filter *f)
 	struct lz4 *lz4 = f->data;
 	int ret = ARCHIVE_OK;
 
+	if (lz4 == NULL)
+		return (ret);
+
 	free(lz4->xxh32_state);
+	lz4->xxh32_state = NULL;
 	free(lz4->out_block);
+	lz4->out_block = NULL;
 	free(lz4);
+	f->data = NULL;
 	return (ret);
 }
 

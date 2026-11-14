@@ -321,8 +321,13 @@ compress_filter_close(struct archive_read_filter *f)
 {
 	struct compress *compress = f->data;
 
+	if (compress == NULL)
+		return (ARCHIVE_OK);
+
 	free(compress->out_block);
+	compress->out_block = NULL;
 	free(compress);
+	f->data = NULL;
 	return (ARCHIVE_OK);
 }
 

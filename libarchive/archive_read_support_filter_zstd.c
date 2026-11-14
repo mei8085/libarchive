@@ -342,9 +342,15 @@ zstd_filter_close(struct archive_read_filter *f)
 {
 	struct zstd *zstd = f->data;
 
+	if (zstd == NULL)
+		return (ARCHIVE_OK);
+
 	ZSTD_freeDStream(zstd->dstream);
+	zstd->dstream = NULL;
 	free(zstd->out_block);
+	zstd->out_block = NULL;
 	free(zstd);
+	f->data = NULL;
 
 	return (ARCHIVE_OK);
 }

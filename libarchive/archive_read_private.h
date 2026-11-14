@@ -256,6 +256,15 @@ int64_t	__archive_read_filter_consume(struct archive_read_filter *, int64_t);
 int __archive_read_header(struct archive_read *, struct archive_entry *);
 int __archive_read_program(struct archive_read_filter *, const char *);
 void __archive_read_free_filters(struct archive_read *);
+
+/*
+ * Mark this filter and every filter upstream of it as fatally failed.
+ * Once marked, the reblocking layer refuses to read from or seek the
+ * chain again, so a failed layer can never be re-entered.  This is
+ * idempotent and safe to call on any filter in the chain.
+ */
+void __archive_read_filter_mark_fatal(struct archive_read_filter *);
+
 struct archive_read_extract *__archive_read_get_extract(struct archive_read *);
 
 

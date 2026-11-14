@@ -1,0 +1,44 @@
+[  0%] Building C object libarchive/CMakeFiles/archive_static.dir/archive_ppmd7.c.o
+[  0%] Building C object libarchive/CMakeFiles/archive_static.dir/archive_ppmd8.c.o
+[  1%] Building C object libarchive/CMakeFiles/archive_static.dir/archive_read.c.o
+[  1%] Building C object libarchive/CMakeFiles/archive_static.dir/archive_read_append_filter.c.o
+[  1%] Building C object libarchive/CMakeFiles/archive_static.dir/archive_read_extract.c.o
+[  1%] Building C object libarchive/CMakeFiles/archive_static.dir/archive_read_data_into_fd.c.o
+[  1%] Building C object libarchive/CMakeFiles/archive_static.dir/archive_read_extract2.c.o
+[  1%] Building C object libarchive/CMakeFiles/archive_static.dir/archive_read_add_passphrase.c.o
+[  1%] Building C object libarchive/CMakeFiles/archive_static.dir/archive_read_set_format.c.o
+[  3%] Building C object libarchive/CMakeFiles/archive_static.dir/archive_read_support_filter_compress.c.o
+[  3%] Building C object libarchive/CMakeFiles/archive_static.dir/archive_read_set_options.c.o
+[  3%] Building C object libarchive/CMakeFiles/archive_static.dir/archive_read_support_filter_bzip2.c.o
+[  3%] Building C object libarchive/CMakeFiles/archive_static.dir/archive_read_support_filter_grzip.c.o
+[  3%] Building C object libarchive/CMakeFiles/archive_static.dir/archive_read_support_filter_lrzip.c.o
+[  3%] Building C object libarchive/CMakeFiles/archive_static.dir/archive_read_support_filter_gzip.c.o
+[  3%] Building C object libarchive/CMakeFiles/archive_static.dir/archive_read_support_filter_lzop.c.o
+[  5%] Building C object libarchive/CMakeFiles/archive_static.dir/archive_read_support_filter_rpm.c.o
+[  5%] Building C object libarchive/CMakeFiles/archive_static.dir/archive_read_support_filter_xz.c.o
+[  5%] Building C object libarchive/CMakeFiles/archive_static.dir/archive_read_support_filter_lz4.c.o
+[  5%] Building C object libarchive/CMakeFiles/archive_static.dir/archive_read_support_filter_zstd.c.o
+[  5%] Building C object libarchive/CMakeFiles/archive_static.dir/archive_read_support_filter_uu.c.o
+[  5%] Building C object libarchive/CMakeFiles/archive_static.dir/archive_read_support_filter_program.c.o
+[  5%] Building C object libarchive/CMakeFiles/archive_static.dir/archive_read_support_format_7zip.c.o
+[  5%] Building C object libarchive/CMakeFiles/archive_static.dir/archive_read_support_format_ar.c.o
+[  5%] Building C object libarchive/CMakeFiles/archive_static.dir/archive_read_support_format_cab.c.o
+[  6%] Building C object libarchive/CMakeFiles/archive_static.dir/archive_read_support_format_cpio.c.o
+[  6%] Building C object libarchive/CMakeFiles/archive_static.dir/archive_read_support_format_empty.c.o
+[  6%] Building C object libarchive/CMakeFiles/archive_static.dir/archive_read_support_format_iso9660.c.o
+[  6%] Building C object libarchive/CMakeFiles/archive_static.dir/archive_read_support_format_lha.c.o
+[  6%] Building C object libarchive/CMakeFiles/archive_static.dir/archive_read_support_format_mtree.c.o
+[  6%] Building C object libarchive/CMakeFiles/archive_static.dir/archive_read_support_format_rar.c.o
+[  6%] Building C object libarchive/CMakeFiles/archive_static.dir/archive_read_support_format_rar5.c.o
+[  6%] Building C object libarchive/CMakeFiles/archive_static.dir/archive_read_support_format_raw.c.o
+[  6%] Building C object libarchive/CMakeFiles/archive_static.dir/archive_read_support_format_tar.c.o
+[  6%] Building C object libarchive/CMakeFiles/archive_static.dir/archive_read_support_format_xar.c.o
+[  8%] Building C object libarchive/CMakeFiles/archive_static.dir/archive_read_support_format_warc.c.o
+[  8%] Building C object libarchive/CMakeFiles/archive_static.dir/archive_write_disk_set_standard_lookup.c.o
+[  8%] Building C object libarchive/CMakeFiles/archive_static.dir/archive_read_support_format_zip.c.o
+[  8%] Building C object libarchive/CMakeFiles/archive_static.dir/archive_write_set_format_7zip.c.o
+[  8%] Linking C static library libarchive.a
+[ 23%] Built target archive_static
+[ 23%] Building C object libarchive/test/CMakeFiles/libarchive_test.dir/test_archive_read.c.o
+[ 25%] Linking C executable ../../bin/libarchive_test
+[100%] Built target libarchive_test

@@ -1,0 +1,6 @@
+[ 23%] Built target archive_static
+[ 23%] Generating /srv/fb2/mei8085/0066-libarchive-4-cd378985/_build/libarchive/test/list.h
+[ 23%] Building C object libarchive/test/CMakeFiles/libarchive_test.dir/__/__/test_utils/test_main.c.o
+[ 23%] Building C object libarchive/test/CMakeFiles/libarchive_test.dir/test_read_multilayer_filter.c.o
+[ 25%] Linking C executable ../../bin/libarchive_test
+[100%] Built target libarchive_test
