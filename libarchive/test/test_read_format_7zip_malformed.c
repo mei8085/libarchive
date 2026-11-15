@@ -110,6 +110,54 @@ test_malformed_numfiles_oom(void)
 	assertEqualInt(ARCHIVE_OK, archive_read_free(a));
 }
 
+/*
+ * A pack stream count far larger than the header that records it must
+ * be rejected before it is used to size any allocation, the rejection
+ * must be repeatable, and the handle must stay in a clean state.
+ */
+static void
+test_malformed_packstreams(void)
+{
+	const char *refname = "test_read_format_7zip_malformed_packstreams.7z";
+	struct archive *a;
+	struct archive_entry *ae;
+
+	extract_reference_file(refname);
+
+	assert((a = archive_read_new()) != NULL);
+	assertEqualIntA(a, ARCHIVE_OK, archive_read_support_filter_all(a));
+	assertEqualIntA(a, ARCHIVE_OK, archive_read_support_format_all(a));
+	assertEqualIntA(a, ARCHIVE_OK, archive_read_open_filename(a, refname, 10240));
+	assertEqualIntA(a, ARCHIVE_FATAL, archive_read_next_header(a, &ae));
+	/* The error state must be repeatable. */
+	assertEqualIntA(a, ARCHIVE_FATAL, archive_read_next_header(a, &ae));
+	assertEqualInt(ARCHIVE_OK, archive_read_free(a));
+}
+
+/*
+ * A substream count far larger than the header that records it must
+ * be rejected before it is used to size any allocation, the rejection
+ * must be repeatable, and the handle must stay in a clean state.
+ */
+static void
+test_malformed_substreams(void)
+{
+	const char *refname = "test_read_format_7zip_malformed_substreams.7z";
+	struct archive *a;
+	struct archive_entry *ae;
+
+	extract_reference_file(refname);
+
+	assert((a = archive_read_new()) != NULL);
+	assertEqualIntA(a, ARCHIVE_OK, archive_read_support_filter_all(a));
+	assertEqualIntA(a, ARCHIVE_OK, archive_read_support_format_all(a));
+	assertEqualIntA(a, ARCHIVE_OK, archive_read_open_filename(a, refname, 10240));
+	assertEqualIntA(a, ARCHIVE_FATAL, archive_read_next_header(a, &ae));
+	/* The error state must be repeatable. */
+	assertEqualIntA(a, ARCHIVE_FATAL, archive_read_next_header(a, &ae));
+	assertEqualInt(ARCHIVE_OK, archive_read_free(a));
+}
+
 DEFINE_TEST(test_read_format_7zip_malformed)
 {
 	test_malformed1();
@@ -117,4 +165,6 @@ DEFINE_TEST(test_read_format_7zip_malformed)
 	test_malformed3();
 	test_malformed4();
 	test_malformed_numfiles_oom();
+	test_malformed_packstreams();
+	test_malformed_substreams();
 }

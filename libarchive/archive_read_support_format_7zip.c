@@ -932,8 +932,25 @@ archive_read_format_7zip_read_header(struct archive_read *a,
 		memset(&header, 0, sizeof(header));
 		r = slurp_central_directory(a, zip, &header);
 		free_Header(&header);
-		if (r != ARCHIVE_OK)
+		if (r != ARCHIVE_OK) {
+			/*
+			 * The header was rejected.  Drop any partially
+			 * parsed directory data so that no stale state
+			 * (entry list, stream info, header phase) can be
+			 * mistaken for a valid directory by a later call;
+			 * a repeated call must fail the same way instead
+			 * of acting on half-initialized data.
+			 */
+			free_StreamsInfo(&(zip->si));
+			memset(&(zip->si), 0, sizeof(zip->si));
+			free(zip->entries);
+			zip->entries = NULL;
+			zip->numFiles = 0;
+			free(zip->entry_names);
+			zip->entry_names = NULL;
+			zip->header_is_being_read = 0;
 			return (r);
+		}
 		zip->entries_remaining = zip->numFiles;
 		zip->entry = zip->entries;
 	} else {
@@ -2238,10 +2255,19 @@ free_Digest(struct _7z_digests *d)
 static int
 read_Digests(struct archive_read *a, struct _7z_digests *d, size_t num)
 {
+	struct _7zip *zip = a->format->data;
 	const unsigned char *p;
 	size_t i;
 
 	if (num == 0)
+		return (-1);
+	/*
+	 * Each digest consumes at least one bit (its "defined" flag) in
+	 * the header, so a digest count that needs more bits than the
+	 * bytes left in the header cannot be honored and is rejected here
+	 * before it is used to size the allocations below.
+	 */
+	if (num / 8 > (uint64_t)zip->header_bytes_remaining)
 		return (-1);
 	memset(d, 0, sizeof(*d));
 
@@ -2285,6 +2311,7 @@ free_PackInfo(struct _7z_pack_info *pi)
 static int
 read_PackInfo(struct archive_read *a, struct _7z_pack_info *pi)
 {
+	struct _7zip *zip = a->format->data;
 	const unsigned char *p;
 	size_t i;
 
@@ -2302,6 +2329,14 @@ read_PackInfo(struct archive_read *a, struct _7z_pack_info *pi)
 	if (parse_7zip_size(a, &(pi->numPackStreams)) < 0)
 		return (-1);
 	if (pi->numPackStreams == 0)
+		return (-1);
+	/*
+	 * Each pack stream is described by at least one byte (its packed
+	 * size) in the header, so a pack stream count larger than the
+	 * bytes left in the header cannot be honored and is rejected here
+	 * before it is used to size the allocations below.
+	 */
+	if (pi->numPackStreams > (uint64_t)zip->header_bytes_remaining)
 		return (-1);
 
 	/*
@@ -2657,6 +2692,7 @@ static int
 read_SubStreamsInfo(struct archive_read *a, struct _7z_substream_info *ss,
     struct _7z_folder *f, size_t numFolders)
 {
+	struct _7zip *zip = a->format->data;
 	const unsigned char *p;
 	int64_t *usizes;
 	size_t numDigests;
@@ -2696,6 +2732,17 @@ read_SubStreamsInfo(struct archive_read *a, struct _7z_substream_info *ss,
 			if (f[i].numUnpackStreams > 1)
 				return (-1);
 		}
+	} else if (unpack_streams > numFolders &&
+	    unpack_streams - numFolders >
+	    (uint64_t)zip->header_bytes_remaining) {
+		/*
+		 * Every substream except the last one of each folder is
+		 * described by at least one byte (its size) in the header,
+		 * so a substream count that needs more bytes than the
+		 * header holds cannot be honored and is rejected here
+		 * before it is used to size the allocations below.
+		 */
+		return (-1);
 	}
 
 	ss->unpack_streams = unpack_streams;
