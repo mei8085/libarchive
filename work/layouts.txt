@@ -1,0 +1,245 @@
+file=s01_pax_len_shorter.tar (3072 bytes)
+  +0        hdr[0] type='x' name='PaxHeader/0000000000' ustar_size=20 magic=b'ustar\x00'
+  +512        body (20 B) -> block end +1024
+             rec: b'14 path=AAAAAAAAAAA'
+  +1024     hdr[1] type='0' name='real_file.txt'        ustar_size=5 magic=b'ustar\x00'
+  +1536       body (5 B) -> block end +2048
+  +2048     NULL block (end marker)
+  +2560     NULL block (end marker)
+
+file=s02_pax_len_longer.tar (3072 bytes)
+  +0        hdr[0] type='x' name='PaxHeader/0000000000' ustar_size=17 magic=b'ustar\x00'
+  +512        body (17 B) -> block end +1024
+             rec: b'60 path=BBBBBBBB'
+  +1024     hdr[1] type='0' name='after_pax.txt'        ustar_size=3 magic=b'ustar\x00'
+  +1536       body (3 B) -> block end +2048
+  +2048     NULL block (end marker)
+  +2560     NULL block (end marker)
+
+file=s03_pax_line_overflow.tar (3072 bytes)
+  +0        hdr[0] type='x' name='PaxHeader/0000000000' ustar_size=17 magic=b'ustar\x00'
+  +512        body (17 B) -> block end +1024
+             rec: b'100000000 path=x'
+  +1024     hdr[1] type='0' name='victim.txt'           ustar_size=2 magic=b'ustar\x00'
+  +1536       body (2 B) -> block end +2048
+  +2048     NULL block (end marker)
+  +2560     NULL block (end marker)
+
+file=s04_pax_size_huge.tar (2560 bytes)
+  +0        hdr[0] type='x' name='PaxHeader/0000000000' ustar_size=28 magic=b'ustar\x00'
+  +512        body (28 B) -> block end +1024
+             rec: b'28 size=9999999999999999999'
+  +1024     hdr[1] type='0' name='huge.txt'             ustar_size=0 magic=b'ustar\x00'
+  +1536     NULL block (end marker)
+  +2048     NULL block (end marker)
+
+file=s05_pax_size_negative.tar (2560 bytes)
+  +0        hdr[0] type='x' name='PaxHeader/0000000000' ustar_size=11 magic=b'ustar\x00'
+  +512        body (11 B) -> block end +1024
+             rec: b'11 size=-5'
+  +1024     hdr[1] type='0' name='neg.txt'              ustar_size=0 magic=b'ustar\x00'
+  +1536     NULL block (end marker)
+  +2048     NULL block (end marker)
+
+file=s06_size_conflict_pax_bigger.tar (4096 bytes)
+  +0        hdr[0] type='x' name='PaxHeader/0000000000' ustar_size=9 magic=b'ustar\x00'
+  +512        body (9 B) -> block end +1024
+             rec: b'9 size=8'
+  +1024     hdr[1] type='0' name='conflict_big.txt'     ustar_size=3 magic=b'ustar\x00'
+  +1536       body (3 B) -> block end +2048
+  +2048     hdr[2] type='0' name='second.txt'           ustar_size=2 magic=b'ustar\x00'
+  +2560       body (2 B) -> block end +3072
+  +3072     NULL block (end marker)
+  +3584     NULL block (end marker)
+
+file=s07_size_conflict_pax_smaller.tar (4096 bytes)
+  +0        hdr[0] type='x' name='PaxHeader/0000000000' ustar_size=9 magic=b'ustar\x00'
+  +512        body (9 B) -> block end +1024
+             rec: b'9 size=3'
+  +1024     hdr[1] type='0' name='conflict_small.txt'   ustar_size=8 magic=b'ustar\x00'
+  +1536       body (8 B) -> block end +2048
+  +2048     hdr[2] type='0' name='after_small.txt'      ustar_size=1 magic=b'ustar\x00'
+  +2560       body (1 B) -> block end +3072
+  +3072     NULL block (end marker)
+  +3584     NULL block (end marker)
+
+file=s08_len_swallows_record.tar (3072 bytes)
+  +0        hdr[0] type='x' name='PaxHeader/0000000000' ustar_size=28 magic=b'ustar\x00'
+  +512        body (28 B) -> block end +1024
+             rec: b'40 path=first_name'
+             rec: b'9 size=1'
+  +1024     hdr[1] type='0' name='entry.txt'            ustar_size=1 magic=b'ustar\x00'
+  +1536       body (1 B) -> block end +2048
+  +2048     NULL block (end marker)
+  +2560     NULL block (end marker)
+
+file=s09_empty_name.tar (3072 bytes)
+  +0        hdr[0] type='x' name='PaxHeader/0000000000' ustar_size=5 magic=b'ustar\x00'
+  +512        body (5 B) -> block end +1024
+             rec: b'10 ='
+  +1024     hdr[1] type='0' name='x.txt'                ustar_size=1 magic=b'ustar\x00'
+  +1536       body (1 B) -> block end +2048
+  +2048     NULL block (end marker)
+  +2560     NULL block (end marker)
+
+file=s10_truncated_eof.tar (612 bytes)
+  +0        hdr[0] type='x' name='PaxHeader/trunc'      ustar_size=512 magic=b'ustar\x00'
+  +512        body (512 B) -> block end +1024
+             rec: b'14 path=trunc'
+             rec: b'\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00'
+
+file=s11_ext_2gib.tar (512 bytes)
+  +0        hdr[0] type='x' name='PaxHeader/big'        ustar_size=2147483648 magic=b'ustar\x00'
+  +512        body (2147483648 B) -> block end +2147484160
+
+file=s12_valid_compat.tar (5120 bytes)
+  +0        hdr[0] type='x' name='PaxHeader/0000000000' ustar_size=191 magic=b'ustar\x00'
+  +512        body (191 B) -> block end +1024
+             rec: b'152 path=dir/eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee'
+             rec: b'9 size=5'
+             rec: b'30 mtime=1700000000.123456789'
+  +1024     hdr[1] type='0' name='PaxHeader/file'       ustar_size=5 magic=b'ustar\x00'
+  +1536       body (5 B) -> block end +2048
+  +2048     hdr[2] type='x' name='PaxHeader/0000000001' ustar_size=26 magic=b'ustar\x00'
+  +2560       body (26 B) -> block end +3072
+             rec: b'26 path=second/normal.txt'
+  +3072     hdr[3] type='0' name='PaxHeader/file2'      ustar_size=7 magic=b'ustar\x00'
+  +3584       body (7 B) -> block end +4096
+  +4096     NULL block (end marker)
+  +4608     NULL block (end marker)
+
+file=s13_duplicate_size.tar (4096 bytes)
+  +0        hdr[0] type='x' name='PaxHeader/0000000000' ustar_size=18 magic=b'ustar\x00'
+  +512        body (18 B) -> block end +1024
+             rec: b'9 size=3'
+             rec: b'9 size=9'
+  +1024     hdr[1] type='0' name='dup.txt'              ustar_size=3 magic=b'ustar\x00'
+  +1536       body (3 B) -> block end +2048
+  +2048     hdr[2] type='0' name='after_dup.txt'        ustar_size=1 magic=b'ustar\x00'
+  +2560       body (1 B) -> block end +3072
+  +3072     NULL block (end marker)
+  +3584     NULL block (end marker)
+
+file=s14_non_numeric_size.tar (3072 bytes)
+  +0        hdr[0] type='x' name='PaxHeader/0000000000' ustar_size=13 magic=b'ustar\x00'
+  +512        body (13 B) -> block end +1024
+             rec: b'13 size=4abc'
+  +1024     hdr[1] type='0' name='garbage.txt'          ustar_size=4 magic=b'ustar\x00'
+  +1536       body (4 B) -> block end +2048
+  +2048     NULL block (end marker)
+  +2560     NULL block (end marker)
+
+file=s15_hidden_entry.tar (4608 bytes)
+  +0        hdr[0] type='x' name='PaxHeader/0000000000' ustar_size=13 magic=b'ustar\x00'
+  +512        body (13 B) -> block end +1024
+             rec: b'13 size=1024'
+  +1024     hdr[1] type='0' name='carrier.txt'          ustar_size=0 magic=b'ustar\x00'
+  +1536     hdr[2] type='0' name='forged.txt'           ustar_size=4 magic=b'ustar\x00'
+  +2048       body (4 B) -> block end +2560
+  +2560     hdr[3] type='0' name='legit_after.txt'      ustar_size=1 magic=b'ustar\x00'
+  +3072       body (1 B) -> block end +3584
+  +3584     NULL block (end marker)
+  +4096     NULL block (end marker)
+
+file=s16_good_then_bad.tar (3072 bytes)
+  +0        hdr[0] type='x' name='PaxHeader/0000000000' ustar_size=48 magic=b'ustar\x00'
+  +512        body (48 B) -> block end +1024
+             rec: b'37 path=attacker_controlled_name.txt'
+             rec: b'999 size=1'
+  +1024     hdr[1] type='0' name='innocent.txt'         ustar_size=4 magic=b'ustar\x00'
+  +1536       body (4 B) -> block end +2048
+  +2048     NULL block (end marker)
+  +2560     NULL block (end marker)
+
+file=s17_bad_then_good.tar (3072 bytes)
+  +0        hdr[0] type='x' name='PaxHeader/0000000000' ustar_size=35 magic=b'ustar\x00'
+  +512        body (35 B) -> block end +1024
+             rec: b'999 path=ignored_name.txt'
+             rec: b'9 size=2'
+  +1024     hdr[1] type='0' name='real.txt'             ustar_size=2 magic=b'ustar\x00'
+  +1536       body (2 B) -> block end +2048
+  +2048     NULL block (end marker)
+  +2560     NULL block (end marker)
+
+file=s18_value_underflow.tar (3072 bytes)
+  +0        hdr[0] type='x' name='PaxHeader/0000000000' ustar_size=12 magic=b'ustar\x00'
+  +512        body (12 B) -> block end +1024
+             rec: b'72 path=zzz'
+  +1024     hdr[1] type='0' name='u.txt'                ustar_size=1 magic=b'ustar\x00'
+  +1536       body (1 B) -> block end +2048
+  +2048     NULL block (end marker)
+  +2560     NULL block (end marker)
+
+file=s19_framing_ok.tar (4096 bytes)
+  +0        hdr[0] type='x' name='PaxHeader/0000000000' ustar_size=9 magic=b'ustar\x00'
+  +512        body (9 B) -> block end +1024
+             rec: b'9 size=3'
+  +1024     hdr[1] type='0' name='a.txt'                ustar_size=3 magic=b'ustar\x00'
+  +1536       body (3 B) -> block end +2048
+  +2048     hdr[2] type='0' name='b.txt'                ustar_size=1 magic=b'ustar\x00'
+  +2560       body (1 B) -> block end +3072
+  +3072     NULL block (end marker)
+  +3584     NULL block (end marker)
+
+file=s20_global_badattr.tar (3072 bytes)
+  +0        hdr[0] type='g' name='GlobalHead'           ustar_size=24 magic=b'ustar\x00'
+  +512        body (24 B) -> block end +1024
+             rec: b'24 path=global_evil.txt'
+  +1024     hdr[1] type='0' name='after_global.txt'     ustar_size=1 magic=b'ustar\x00'
+  +1536       body (1 B) -> block end +2048
+  +2048     NULL block (end marker)
+  +2560     NULL block (end marker)
+
+file=s21_global_benign.tar (3072 bytes)
+  +0        hdr[0] type='g' name='GlobalHead2'          ustar_size=22 magic=b'ustar\x00'
+  +512        body (22 B) -> block end +1024
+             rec: b'22 VENDOR.thing=hello'
+  +1024     hdr[1] type='0' name='ok.txt'               ustar_size=1 magic=b'ustar\x00'
+  +1536       body (1 B) -> block end +2048
+  +2048     NULL block (end marker)
+  +2560     NULL block (end marker)
+
+file=s22_desync_pax0_ustar513.tar (4608 bytes)
+  +0        hdr[0] type='x' name='PaxHeader/0000000000' ustar_size=9 magic=b'ustar\x00'
+  +512        body (9 B) -> block end +1024
+             rec: b'9 size=0'
+  +1024     hdr[1] type='0' name='carrier.txt'          ustar_size=513 magic=b'ustar\x00'
+  +1536       body (513 B) -> block end +2560
+  +2560     hdr[2] type='0' name='tail_real.txt'        ustar_size=2 magic=b'ustar\x00'
+  +3072       body (2 B) -> block end +3584
+  +3584     NULL block (end marker)
+  +4096     NULL block (end marker)
+
+file=s23_desync_pax1024_ustar0.tar (4608 bytes)
+  +0        hdr[0] type='x' name='PaxHeader/0000000000' ustar_size=13 magic=b'ustar\x00'
+  +512        body (13 B) -> block end +1024
+             rec: b'13 size=1024'
+  +1024     hdr[1] type='0' name='swallower.txt'        ustar_size=0 magic=b'ustar\x00'
+  +1536     hdr[2] type='0' name='hidden_real.txt'      ustar_size=4 magic=b'ustar\x00'
+  +2048       body (4 B) -> block end +2560
+  +2560     hdr[3] type='0' name='after.txt'            ustar_size=1 magic=b'ustar\x00'
+  +3072       body (1 B) -> block end +3584
+  +3584     NULL block (end marker)
+  +4096     NULL block (end marker)
+
+file=s24_desync_pax1_ustar512.tar (4096 bytes)
+  +0        hdr[0] type='x' name='PaxHeader/0000000000' ustar_size=9 magic=b'ustar\x00'
+  +512        body (9 B) -> block end +1024
+             rec: b'9 size=1'
+  +1024     hdr[1] type='0' name='mild_carrier.txt'     ustar_size=512 magic=b'ustar\x00'
+  +1536       body (512 B) -> block end +2048
+  +2048     hdr[2] type='0' name='mild_tail.txt'        ustar_size=1 magic=b'ustar\x00'
+  +2560       body (1 B) -> block end +3072
+  +3072     NULL block (end marker)
+  +3584     NULL block (end marker)
+
+file=s25_ext_oversize_sparse.tar (2147486208 bytes)
+  +0        hdr[0] type='x' name='PaxHeader/big'        ustar_size=2147483648 magic=b'ustar\x00'
+  +512        body (2147483648 B) -> block end +2147484160
+             rec: b'22 path=after_big.txt'
+             rec: b'\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00'
+  +2147484160 hdr[1] type='0' name='after_big.txt'        ustar_size=1 magic=b'ustar\x00'
+  +2147484672   body (1 B) -> block end +2147485184
+  +2147485184 NULL block (end marker)
+  +2147485696 NULL block (end marker)
+
