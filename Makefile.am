@@ -634,6 +634,7 @@ libarchive_test_SOURCES= \
 	libarchive/test/test_read_format_zip_filename.c \
 	libarchive/test/test_read_format_zip_high_compression.c \
 	libarchive/test/test_read_format_zip_jar.c \
+	libarchive/test/test_read_format_zip_header_mismatch.c \
 	libarchive/test/test_read_format_zip_lzma_alone_large_size.c \
 	libarchive/test/test_read_format_zip_mac_metadata.c \
 	libarchive/test/test_read_format_zip_malformed.c \
