@@ -415,17 +415,39 @@ archive_read_format_cpio_read_header(struct archive_read *a,
 
 	/* If this is a symlink, read the link contents. */
 	if (archive_entry_filetype(entry) == AE_IFLNK) {
-		if (cpio->entry_bytes_remaining > 1024 * 1024) {
-			archive_set_error(&a->archive, ENOMEM,
-			    "Rejecting malformed cpio archive: symlink contents exceed 1 megabyte");
-			return (ARCHIVE_FATAL);
+		size_t link_length;
+
+		/*
+		 * Apply the same symlink target checks every format reader
+		 * uses.  Clamp anything the header declared but cannot be
+		 * represented safely: a negative or over-large body length
+		 * is reported as a too-long target instead of being trusted.
+		 */
+		if (cpio->entry_bytes_remaining < 0 ||
+		    cpio->entry_bytes_remaining > ARCHIVE_SYMLINK_TARGET_MAX)
+			link_length = ARCHIVE_SYMLINK_TARGET_MAX + 1;
+		else
+			link_length = (size_t)cpio->entry_bytes_remaining;
+		if (__archive_read_check_symlink_target(a, entry, NULL,
+		    link_length) != ARCHIVE_OK) {
+			/*
+			 * Leave a well-formed body for the read core to skip;
+			 * a nonsensical (negative) length cannot be skipped and
+			 * would otherwise turn into a huge unsigned request.
+			 */
+			if (cpio->entry_bytes_remaining < 0)
+				cpio->entry_bytes_remaining = 0;
+			return (ARCHIVE_FAILED);
 		}
-		hl = __archive_read_ahead(a,
-			(size_t)cpio->entry_bytes_remaining, NULL);
+		hl = __archive_read_ahead(a, link_length, NULL);
 		if (hl == NULL)
 			return (ARCHIVE_FATAL);
+		/* The bytes themselves must also be well-formed. */
+		if (__archive_read_check_symlink_target(a, entry, hl,
+		    link_length) != ARCHIVE_OK)
+			return (ARCHIVE_FAILED);
 		if (archive_entry_copy_symlink_l(entry, (const char *)hl,
-		    (size_t)cpio->entry_bytes_remaining, sconv) != 0) {
+		    link_length, sconv) != 0) {
 			if (errno == ENOMEM) {
 				archive_set_error(&a->archive, ENOMEM,
 				    "Can't allocate memory for Linkname");

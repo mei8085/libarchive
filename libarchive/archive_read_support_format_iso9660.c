@@ -292,6 +292,8 @@ struct file_info {
 	char		 name_continues; /* Non-zero if name continues */
 	struct archive_string symlink;
 	char		 symlink_continues; /* Non-zero if link continues */
+	char		 symlink_malformed; /* Non-zero if the SL records
+					      * described an invalid target. */
 	/* Set 1 if this file compressed by paged zlib(zisofs) */
 	int		 pz;
 	int		 pz_log2_bs; /* Log2 of block size */
@@ -1357,8 +1359,30 @@ archive_read_format_iso9660_read_header(struct archive_read *a,
 	/* N.B.: Rock Ridge supports 64-bit device numbers. */
 	archive_entry_set_rdev(entry, (dev_t)file->rdev);
 	archive_entry_set_size(entry, iso9660->entry_bytes_remaining);
-	if (file->symlink.s != NULL)
+	if (file->symlink.s != NULL || file->symlink_malformed) {
+		/*
+		 * Apply the same symlink target checks every format reader
+		 * uses.  'symlink_continues' is still set when a record
+		 * promised a continuation that never arrived, so the target
+		 * is truncated.  A malformed target fails only this entry.
+		 */
+		if (file->symlink_malformed || file->symlink_continues) {
+			const char *pathname = archive_entry_pathname(entry);
+
+			archive_set_error(&a->archive,
+			    ARCHIVE_ERRNO_FILE_FORMAT,
+			    "Malformed symlink target in entry \"%s\": %s",
+			    pathname != NULL ? pathname : "",
+			    file->symlink_continues ?
+			    "truncated symlink target" :
+			    "invalid Rock Ridge \"SL\" record");
+			return (ARCHIVE_FAILED);
+		}
+		if (__archive_read_check_symlink_target(a, entry,
+		    file->symlink.s, file->symlink.length) != ARCHIVE_OK)
+			return (ARCHIVE_FAILED);
 		archive_entry_copy_symlink(entry, file->symlink.s);
+	}
 
 	/* Note: If the input isn't seekable, we can't rewind to
 	 * return the same body again, so if the next entry refers to
@@ -2009,6 +2033,7 @@ parse_file_info(struct archive_read *a, struct file_info *parent,
 
 			file->name_continues = 0;
 			file->symlink_continues = 0;
+			file->symlink_malformed = 0;
 			rr_start += iso9660->suspOffset;
 			r = parse_rockridge(a, file, rr_start, rr_end);
 			if (r != ARCHIVE_OK)
@@ -2657,8 +2682,11 @@ parse_rockridge_SL1(struct file_info *file, const unsigned char *data,
 	 *  1: this symbolic link field continues in next SL entry
 	 *  All other values are reserved.
 	 */
-	if (data_length < 1)
+	if (data_length < 1) {
+		/* An SL record must carry at least the flag byte. */
+		file->symlink_malformed = 1;
 		return;
+	}
 	switch(*data) {
 	case 0:
 		break;
@@ -2666,6 +2694,7 @@ parse_rockridge_SL1(struct file_info *file, const unsigned char *data,
 		file->symlink_continues = 1;
 		break;
 	default:
+		file->symlink_malformed = 1;
 		return;
 	}
 	++data;  /* Skip flag byte. */
@@ -2685,19 +2714,41 @@ parse_rockridge_SL1(struct file_info *file, const unsigned char *data,
 		unsigned char nlen = *data++;
 		data_length -= 2;
 
+		/*
+		 * The accumulated target obeys the same length limit as
+		 * every other format reader; do not let a long chain of
+		 * continued SL records grow it without bound.
+		 */
+		if (file->symlink.length > ARCHIVE_SYMLINK_TARGET_MAX) {
+			file->symlink_malformed = 1;
+			return;
+		}
+
 		archive_strcat(&file->symlink, separator);
 		separator = "/";
 
 		switch(flag) {
 		case 0: /* Usual case, this is text. */
-			if (data_length < nlen)
+			if (data_length < nlen) {
+				/* Component runs past the record. */
+				file->symlink_malformed = 1;
 				return;
+			}
+			/* archive_strncat() stops at an embedded NUL and
+			 * would silently truncate the target; reject such
+			 * targets instead. */
+			if (memchr(data, '\0', nlen) != NULL)
+				file->symlink_malformed = 1;
 			archive_strncat(&file->symlink,
 			    (const char *)data, nlen);
 			break;
 		case 0x01: /* Text continues in next component. */
-			if (data_length < nlen)
+			if (data_length < nlen) {
+				file->symlink_malformed = 1;
 				return;
+			}
+			if (memchr(data, '\0', nlen) != NULL)
+				file->symlink_malformed = 1;
 			archive_strncat(&file->symlink,
 			    (const char *)data, nlen);
 			separator = "";
@@ -2720,11 +2771,16 @@ parse_rockridge_SL1(struct file_info *file, const unsigned char *data,
 			archive_strcat(&file->symlink, "hostname");
 			break;
 		default:
-			/* TODO: issue a warning ? */
+			/* A reserved component flag cannot be interpreted. */
+			file->symlink_malformed = 1;
 			return;
 		}
 		data += nlen;
 		data_length -= nlen;
+	}
+	if (data_length != 0) {
+		/* A dangling partial component header. */
+		file->symlink_malformed = 1;
 	}
 }
 

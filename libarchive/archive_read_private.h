@@ -246,6 +246,29 @@ int __archive_read_register_bidder(struct archive_read *a,
 		void *bidder_data,
 		const struct archive_read_filter_bidder_vtable *vtable);
 
+/*
+ * Upper bound, in bytes, on a symlink target that a format reader will
+ * deliver.  Longer targets are rejected as malformed.  Every reader that
+ * can report a symlink applies the same limit; the value preserves the
+ * historical cpio reader limit of one megabyte.
+ */
+#define	ARCHIVE_SYMLINK_TARGET_MAX	(1024 * 1024)
+
+/*
+ * Validate a symlink target that a format reader has just obtained from
+ * the archive, applying the same rules regardless of the source format:
+ * the target must be non-empty, no longer than ARCHIVE_SYMLINK_TARGET_MAX
+ * bytes, and free of embedded NUL bytes.  'target' may be NULL when only
+ * the declared length is known (for example a target that has not been
+ * decompressed yet); the byte-oriented checks are then skipped.
+ *
+ * The error message names the faulty entry.  Returns ARCHIVE_OK for a
+ * well-formed target, or ARCHIVE_FAILED so that only this entry fails
+ * instead of aborting the whole archive.
+ */
+int	__archive_read_check_symlink_target(struct archive_read *,
+	    struct archive_entry *, const void *, size_t);
+
 const void *__archive_read_ahead(struct archive_read *, size_t, ssize_t *);
 const void *__archive_read_filter_ahead(struct archive_read_filter *,
     size_t, ssize_t *);

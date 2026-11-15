@@ -291,6 +291,10 @@ zip_read_data_zipx_lzma_alone(struct archive_read *a, const void **buff,
 	size_t *size, int64_t *offset);
 #endif
 
+static int
+zip_read_data_common(struct archive_read *a, const void **buff,
+    size_t *size, int64_t *offset, int);
+
 static void
 trad_enc_decrypt_update(struct trad_enc_ctx *, const uint8_t *, size_t,
     uint8_t *, size_t);
@@ -1508,70 +1512,286 @@ zip_read_local_file_header(struct archive_read *a, struct archive_entry *entry,
 		    zip_entry->btime_ns);
 
 	if ((zip->entry->mode & AE_IFMT) == AE_IFLNK) {
-		size_t linkname_length;
-
-		if (zip_entry->compressed_size > 64 * 1024) {
-			archive_set_error(&a->archive, ARCHIVE_ERRNO_MISC,
-			    "Zip file with oversized link entry");
-			return ARCHIVE_FATAL;
-		}
-
-		linkname_length = (size_t)zip_entry->compressed_size;
+		struct archive_string linkbuf;
+		const char *link_target;
+		size_t linkname_length, link_target_length;
+		int link_size_known;
+		int link_invalid = 0;
+		int link_too_long = 0;
 
 		archive_entry_set_size(entry, 0);
+		linkname_length = (size_t)zip_entry->compressed_size;
+		/*
+		 * A streaming reader may not know the compressed size until
+		 * the data descriptor has been read; the target then has to be
+		 * assembled from the data blocks.  Only a known size can be
+		 * checked up front.
+		 */
+		link_size_known = (0 == (zip->entry->zip_flags & ZIP_LENGTH_AT_END)
+		    || zip_entry->compressed_size > 0);
 
-		// take into account link compression if any
-		size_t linkname_full_length = linkname_length;
-		if (zip->entry->compression != 0)
-		{
-			// symlink target string appeared to be compressed
-			int status = ARCHIVE_FATAL;
-			const void *uncompressed_buffer = NULL;
+		/*
+		 * A symlink target is delivered as the entry's link name.
+		 * Apply the same constraint as every other format reader:
+		 * an empty or over-long target fails just this entry.  The
+		 * body is left unconsumed so that the read core's skip
+		 * logic can step over it and keep the following entries
+		 * aligned.
+		 */
+		if (link_size_known
+		    && __archive_read_check_symlink_target(a, entry, NULL,
+			linkname_length) != ARCHIVE_OK) {
+			zip->entry_bytes_remaining = zip_entry->compressed_size;
+			return (ARCHIVE_FAILED);
+		}
 
-			switch (zip->entry->compression)
-			{
+		archive_string_init(&linkbuf);
+		link_target = NULL;
+		link_target_length = 0;
+
+		if (!link_size_known) {
+			/*
+			 * Length-at-end target: the size is only known once the
+			 * data descriptor has been read.  Assemble the target
+			 * from the data blocks, bounded by the shared limit.
+			 * This works for stored and compressed bodies alike
+			 * because the general data reader decodes according to
+			 * the entry's compression method.
+			 */
+			zip->entry_bytes_remaining = zip_entry->compressed_size;
+			while (!zip->end_of_entry) {
+				const void *chunk = NULL;
+				size_t chunk_length = 0;
+				int64_t offset = 0;
+				/*
+				 * Use the full data pipeline so that the
+				 * data descriptor, CRC and declared sizes are
+				 * validated exactly as for a regular entry.
+				 */
+				int status = zip_read_data_common(a, &chunk,
+				    &chunk_length, &offset, 1);
+
+				if (status != ARCHIVE_OK && status != ARCHIVE_EOF) {
+					if (archive_errno(&a->archive) == ENOMEM) {
+						archive_string_free(&linkbuf);
+						return (ARCHIVE_FATAL);
+					}
+					link_invalid = 1;
+					break;
+				}
+				if (chunk_length > 0 && !link_too_long) {
+					if (archive_array_append(&linkbuf, chunk,
+						chunk_length) == NULL) {
+						archive_set_error(&a->archive, ENOMEM,
+						    "Can't allocate memory for Symlink");
+						archive_string_free(&linkbuf);
+						return (ARCHIVE_FATAL);
+					}
+					/*
+					 * Once the target exceeds the shared
+					 * limit, stop accumulating it but keep
+					 * draining the entry so that its data
+					 * descriptor is consumed and the next
+					 * entry starts at the right offset.
+					 */
+					if (linkbuf.length >
+					    ARCHIVE_SYMLINK_TARGET_MAX)
+						link_too_long = 1;
+				}
+				if (status == ARCHIVE_EOF)
+					break;
+			}
+			link_target = linkbuf.s;
+			link_target_length = linkbuf.length;
+		} else if (zip->entry->compression != 0) {
+			/*
+			 * The target was stored compressed.  Decompress it
+			 * in as many chunks as the decoder needs: a single
+			 * pass is not enough when the input arrives in small
+			 * pieces and would silently truncate the target.
+			 */
+			int unsupported = 0;
+
+			zip->entry_bytes_remaining = zip_entry->compressed_size;
+			while (!zip->end_of_entry) {
+				const void *chunk = NULL;
+				size_t chunk_length = 0;
+				int64_t remaining_before =
+				    zip->entry_bytes_remaining;
+				int status = ARCHIVE_OK;
+
+				switch (zip->entry->compression) {
 #if HAVE_ZLIB_H
 				case 8: /* Deflate compression. */
-					zip->entry_bytes_remaining = zip_entry->compressed_size;
-					status = zip_read_data_deflate(a, &uncompressed_buffer,
-						&linkname_full_length, NULL);
+					status = zip_read_data_deflate(a,
+					    &chunk, &chunk_length, NULL);
 					break;
 #endif
 #if HAVE_LZMA_H && HAVE_LIBLZMA
 				case 14: /* ZIPx LZMA compression. */
-					/*(see zip file format specification, section 4.4.5)*/
-					zip->entry_bytes_remaining = zip_entry->compressed_size;
-					status = zip_read_data_zipx_lzma_alone(a, &uncompressed_buffer,
-						&linkname_full_length, NULL);
+					/*(see zip file format specification,
+					 * section 4.4.5)*/
+					status = zip_read_data_zipx_lzma_alone(a,
+					    &chunk, &chunk_length, NULL);
 					break;
 #endif
 				default: /* Unsupported compression. */
+					unsupported = 1;
 					break;
+				}
+				if (unsupported)
+					break;
+				if (status != ARCHIVE_OK) {
+					if (archive_errno(&a->archive) == ENOMEM) {
+						archive_string_free(&linkbuf);
+						return (ARCHIVE_FATAL);
+					}
+					/*
+					 * The target could not be fully decoded
+					 * (a corrupt or truncated stream).  Fail
+					 * just this entry with a message of the
+					 * same shape as every other format, and
+					 * skip the remaining declared bytes below
+					 * so that the next entry stays aligned.
+					 */
+					archive_set_error(&a->archive,
+					    ARCHIVE_ERRNO_FILE_FORMAT,
+					    "Malformed symlink target in entry "
+					    "\"%s\": %s",
+					    archive_entry_pathname(entry) != NULL ?
+					    archive_entry_pathname(entry) : "",
+					    "truncated or unreadable symlink "
+					    "target");
+					link_invalid = 1;
+					break;
+				}
+
+				/*
+				 * Append the raw bytes.  archive_strncat()
+				 * would stop at an embedded NUL and hide the
+				 * malformed target from validation.
+				 */
+				if (chunk_length > 0 &&
+				    archive_array_append(&linkbuf, chunk,
+					chunk_length) == NULL) {
+					archive_set_error(&a->archive, ENOMEM,
+					    "Can't allocate memory for Symlink");
+					archive_string_free(&linkbuf);
+					return (ARCHIVE_FATAL);
+				}
+
+				/*
+				 * Stop inflating as soon as the target exceeds
+				 * the shared limit (a decompression bomb), but
+				 * keep draining the compressed stream so that the
+				 * next entry stays aligned; the target is never
+				 * delivered.
+				 */
+				if (linkbuf.length > ARCHIVE_SYMLINK_TARGET_MAX) {
+					link_too_long = 1;
+					archive_string_empty(&linkbuf);
+				}
+				if (zip->end_of_entry)
+					break;
+				/*
+				 * Detect a stream that stopped making
+				 * progress, or that ran out of declared
+				 * compressed bytes, without an end marker.
+				 */
+				if (chunk_length == 0 &&
+				    zip->entry_bytes_remaining ==
+				    remaining_before) {
+					link_invalid = 1;
+					break;
+				}
 			}
-			if (status == ARCHIVE_OK)
-			{
-				p = uncompressed_buffer;
-			}
-			else
-			{
+
+			if (unsupported) {
 				archive_set_error(&a->archive,
-					ARCHIVE_ERRNO_FILE_FORMAT,
-					"Unsupported ZIP compression method "
-					"during decompression of link entry (%d: %s)",
-					zip->entry->compression,
-					compression_name(zip->entry->compression));
-				return ARCHIVE_FAILED;
+				    ARCHIVE_ERRNO_FILE_FORMAT,
+				    "Unsupported ZIP compression method "
+				    "during decompression of link entry (%d: %s)",
+				    zip->entry->compression,
+				    compression_name(zip->entry->compression));
+				archive_string_free(&linkbuf);
+				return (ARCHIVE_FAILED);
 			}
-		}
-		else
-		{
-			p = __archive_read_ahead(a, linkname_length, NULL);
+
+			/*
+			 * Discard whatever compressed bytes the decoder did
+			 * not use so that the next entry starts in the right
+			 * place.  This covers an early stop, a failed decode,
+			 * and a stream that ended before its declared size.
+			 */
+			if (zip->entry_bytes_remaining > 0) {
+				if (__archive_read_consume(a,
+				    zip->entry_bytes_remaining) < 0) {
+					archive_set_error(&a->archive,
+					    ARCHIVE_ERRNO_MISC,
+					    "Read error skipping symlink "
+					    "target name");
+					archive_string_free(&linkbuf);
+					return (ARCHIVE_FATAL);
+				}
+			}
+			zip->entry_bytes_remaining = 0;
+
+			link_target = linkbuf.s;
+			link_target_length = linkbuf.length;
+		} else {
+			const void *stored = __archive_read_ahead(a,
+			    linkname_length, NULL);
+			if (stored == NULL) {
+				archive_set_error(&a->archive,
+				    ARCHIVE_ERRNO_MISC,
+				    "Truncated Zip file");
+				return (ARCHIVE_FATAL);
+			}
+			link_target = stored;
+			link_target_length = linkname_length;
 		}
 
-		if (p == NULL) {
-			archive_set_error(&a->archive, ARCHIVE_ERRNO_MISC,
-			    "Truncated Zip file");
-			return ARCHIVE_FATAL;
+		/*
+		 * Apply the shared checks before delivering the target.  The
+		 * target is rejected as a whole; a truncated or unreadable
+		 * target is never delivered as a prefix.
+		 */
+		if (link_too_long) {
+			archive_set_error(&a->archive, ARCHIVE_ERRNO_FILE_FORMAT,
+			    "Malformed symlink target in entry \"%s\": %s",
+			    archive_entry_pathname(entry) != NULL ?
+			    archive_entry_pathname(entry) : "",
+			    "symlink target is too long");
+			link_invalid = 1;
+		} else if (!link_invalid
+		    && __archive_read_check_symlink_target(a, entry,
+			link_target, link_target_length) != ARCHIVE_OK) {
+			link_invalid = 1;
+		}
+		if (link_invalid && archive_error_string(&a->archive) == NULL)
+			archive_set_error(&a->archive,
+			    ARCHIVE_ERRNO_FILE_FORMAT,
+			    "Malformed symlink target in entry \"%s\": %s",
+			    archive_entry_pathname(entry) != NULL ?
+			    archive_entry_pathname(entry) : "",
+			    "truncated or unreadable symlink target");
+
+		if (link_invalid || link_too_long) {
+			/*
+			 * A stored target whose length is known has not been
+			 * consumed yet; leave it for the read core to skip.  A
+			 * decompressed target and a length-at-end target have
+			 * already had their body read (the latter tracked
+			 * through zip->unconsumed), so its remaining bytes must
+			 * not be consumed a second time here.
+			 */
+			if (link_size_known && zip->entry->compression == 0)
+				zip->entry_bytes_remaining =
+				    zip_entry->compressed_size;
+			zip_entry->uncompressed_size =
+			    zip_entry->compressed_size = 0;
+			archive_string_free(&linkbuf);
+			return (ARCHIVE_FAILED);
 		}
 
 		sconv = zip->sconv;
@@ -1579,15 +1799,16 @@ zip_read_local_file_header(struct archive_read *a, struct archive_entry *entry,
 			sconv = zip->sconv_utf8;
 		if (sconv == NULL)
 			sconv = zip->sconv_default;
-		if (archive_entry_copy_symlink_l(entry, p, linkname_full_length,
-		    sconv) != 0) {
+		if (archive_entry_copy_symlink_l(entry, link_target,
+		    link_target_length, sconv) != 0) {
 			if (errno != ENOMEM && sconv == zip->sconv_utf8 &&
 			    (zip->entry->zip_flags & ZIP_UTF8_NAME))
-			    archive_entry_copy_symlink_l(entry, p,
-				linkname_full_length, NULL);
+			    archive_entry_copy_symlink_l(entry, link_target,
+				link_target_length, NULL);
 			if (errno == ENOMEM) {
 				archive_set_error(&a->archive, ENOMEM,
 				    "Can't allocate memory for Symlink");
+				archive_string_free(&linkbuf);
 				return (ARCHIVE_FATAL);
 			}
 			/*
@@ -1608,11 +1829,17 @@ zip_read_local_file_header(struct archive_read *a, struct archive_entry *entry,
 		}
 		zip_entry->uncompressed_size = zip_entry->compressed_size = 0;
 
-		if (__archive_read_consume(a, linkname_length) < 0) {
-			archive_set_error(&a->archive, ARCHIVE_ERRNO_MISC,
-			    "Read error skipping symlink target name");
-			return ARCHIVE_FATAL;
+		if (link_size_known && zip->entry->compression == 0) {
+			if (__archive_read_consume(a, linkname_length) < 0) {
+				archive_set_error(&a->archive,
+				    ARCHIVE_ERRNO_MISC,
+				    "Read error skipping symlink target name");
+				archive_string_free(&linkbuf);
+				return ARCHIVE_FATAL;
+			}
+			zip->entry_bytes_remaining = 0;
 		}
+		archive_string_free(&linkbuf);
 	} else if (zip_entry_size_is_set(zip_entry)) {
 		archive_entry_set_size(entry, zip_entry->uncompressed_size);
 	}
@@ -3534,8 +3761,72 @@ corrupted:
 }
 
 static int
+zip_read_entry_data(struct archive_read *a,
+    const void **_buff, size_t *size, int64_t *offset)
+{
+	struct zip *zip = a->format->data;
+	int r;
+
+	switch(zip->entry->compression) {
+	case 0:  /* No compression. */
+		r =  zip_read_data_none(a, _buff, size, offset);
+		break;
+#ifdef HAVE_BZLIB_H
+	case 12: /* ZIPx bzip2 compression. */
+		r = zip_read_data_zipx_bzip2(a, _buff, size, offset);
+		break;
+#endif
+#if HAVE_LZMA_H && HAVE_LIBLZMA
+	case 14: /* ZIPx LZMA compression. */
+		r = zip_read_data_zipx_lzma_alone(a, _buff, size, offset);
+		break;
+	case 95: /* ZIPx XZ compression. */
+		r = zip_read_data_zipx_xz(a, _buff, size, offset);
+		break;
+#endif
+#if HAVE_ZSTD_H && HAVE_LIBZSTD
+	case 93: /* ZIPx Zstd compression. */
+		r = zip_read_data_zipx_zstd(a, _buff, size, offset);
+		break;
+#endif
+	/* PPMd support is built-in, so we don't need any #if guards. */
+	case 98: /* ZIPx PPMd compression. */
+		r = zip_read_data_zipx_ppmd(a, _buff, size, offset);
+		break;
+
+#ifdef HAVE_ZLIB_H
+	case 8: /* Deflate compression. */
+		r =  zip_read_data_deflate(a, _buff, size, offset);
+		break;
+#endif
+	default: /* Unsupported compression. */
+		/* Return a warning. */
+		archive_set_error(&a->archive, ARCHIVE_ERRNO_FILE_FORMAT,
+		    "Unsupported ZIP compression method (%d: %s)",
+		    zip->entry->compression, compression_name(zip->entry->compression));
+		/* We can't decompress this entry, but we will
+		 * be able to skip() it and try the next entry. */
+		return (ARCHIVE_FAILED);
+	}
+	return (r);
+}
+
+static int
 archive_read_format_zip_read_data(struct archive_read *a,
     const void **buff, size_t *size, int64_t *offset)
+{
+	return zip_read_data_common(a, buff, size, offset, 0);
+}
+
+/*
+ * The shared data-reading pipeline.  'allow_symlink' is set only by
+ * the symlink reader, which needs to decode a link body whose length
+ * is known only after the data descriptor; ordinary client reads
+ * return EOF for any non-regular entry.
+ */
+static int
+zip_read_data_common(struct archive_read *a, const void **buff,
+    size_t *size, int64_t *offset, int allow_symlink)
 {
 	struct zip *zip = a->format->data;
 	int r;
@@ -3554,7 +3845,7 @@ archive_read_format_zip_read_data(struct archive_read *a,
 		return (ARCHIVE_EOF);
 
 	/* Return EOF immediately if this is a non-regular file. */
-	if (AE_IFREG != (zip->entry->mode & AE_IFMT))
+	if (!allow_symlink && AE_IFREG != (zip->entry->mode & AE_IFMT))
 		return (ARCHIVE_EOF);
 
 	__archive_read_consume(a, zip->unconsumed);
@@ -3573,47 +3864,7 @@ archive_read_format_zip_read_data(struct archive_read *a,
 		zip->init_decryption = 0;
 	}
 
-	switch(zip->entry->compression) {
-	case 0:  /* No compression. */
-		r =  zip_read_data_none(a, buff, size, offset);
-		break;
-#ifdef HAVE_BZLIB_H
-	case 12: /* ZIPx bzip2 compression. */
-		r = zip_read_data_zipx_bzip2(a, buff, size, offset);
-		break;
-#endif
-#if HAVE_LZMA_H && HAVE_LIBLZMA
-	case 14: /* ZIPx LZMA compression. */
-		r = zip_read_data_zipx_lzma_alone(a, buff, size, offset);
-		break;
-	case 95: /* ZIPx XZ compression. */
-		r = zip_read_data_zipx_xz(a, buff, size, offset);
-		break;
-#endif
-#if HAVE_ZSTD_H && HAVE_LIBZSTD
-	case 93: /* ZIPx Zstd compression. */
-		r = zip_read_data_zipx_zstd(a, buff, size, offset);
-		break;
-#endif
-	/* PPMd support is built-in, so we don't need any #if guards. */
-	case 98: /* ZIPx PPMd compression. */
-		r = zip_read_data_zipx_ppmd(a, buff, size, offset);
-		break;
-
-#ifdef HAVE_ZLIB_H
-	case 8: /* Deflate compression. */
-		r =  zip_read_data_deflate(a, buff, size, offset);
-		break;
-#endif
-	default: /* Unsupported compression. */
-		/* Return a warning. */
-		archive_set_error(&a->archive, ARCHIVE_ERRNO_FILE_FORMAT,
-		    "Unsupported ZIP compression method (%d: %s)",
-		    zip->entry->compression, compression_name(zip->entry->compression));
-		/* We can't decompress this entry, but we will
-		 * be able to skip() it and try the next entry. */
-		return (ARCHIVE_FAILED);
-	}
+	r = zip_read_entry_data(a, buff, size, offset);
 	if (r != ARCHIVE_OK)
 		return (r);
 

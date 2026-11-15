@@ -532,6 +532,7 @@ libarchive_test_SOURCES= \
 	libarchive/test/test_read_format_cpio_svr4_gzip.c \
 	libarchive/test/test_read_format_cpio_svr4_gzip_rpm.c \
 	libarchive/test/test_read_format_cpio_svr4c_Z.c \
+	libarchive/test/test_read_format_cpio_malformed_symlink.c \
 	libarchive/test/test_read_format_cpio_symlink_trailer.c \
 	libarchive/test/test_read_format_empty.c \
 	libarchive/test/test_read_format_gtar_filename.c \
@@ -560,6 +561,7 @@ libarchive_test_SOURCES= \
 	libarchive/test/test_read_format_isozisofs_compress.c \
 	libarchive/test/test_read_format_iso_rockridge_ce_overflow.c \
 	libarchive/test/test_read_format_iso_rockridge_cl_re_cycle.c \
+	libarchive/test/test_read_format_iso9660_malformed_symlink.c \
 	libarchive/test/test_read_format_iso_rockridge_sl_leak.c \
 	libarchive/test/test_read_format_iso_rockridge_zf_overflow.c \
 	libarchive/test/test_read_format_iso_zisofs_overflow.c \
@@ -647,6 +649,7 @@ libarchive_test_SOURCES= \
 	libarchive/test/test_read_format_zip_sfx.c \
 	libarchive/test/test_read_format_zip_size_exceeds_declared.c \
 	libarchive/test/test_read_format_zip_streamable_skip.c \
+	libarchive/test/test_read_format_zip_malformed_symlink.c \
 	libarchive/test/test_read_format_zip_symlink_unsupported_compression.c \
 	libarchive/test/test_read_format_zip_traditional_encryption_data.c \
 	libarchive/test/test_read_format_zip_uncompressed_size_off_by_4gib.c \

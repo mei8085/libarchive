@@ -647,6 +647,36 @@ __archive_read_header(struct archive_read *a, struct archive_entry *entry)
 }
 
 /*
+ * Shared validation for a symlink target read from any archive format.
+ * See archive_read_private.h for the contract.
+ */
+int
+__archive_read_check_symlink_target(struct archive_read *a,
+    struct archive_entry *entry, const void *target, size_t length)
+{
+	const char *pathname;
+	const char *reason;
+
+	pathname = archive_entry_pathname(entry);
+	if (pathname == NULL)
+		pathname = "";
+
+	if (length == 0)
+		reason = "empty symlink target";
+	else if (length > ARCHIVE_SYMLINK_TARGET_MAX)
+		reason = "symlink target is too long";
+	else if (target != NULL && memchr(target, '\0', length) != NULL)
+		reason = "symlink target contains an embedded NUL byte";
+	else
+		return (ARCHIVE_OK);
+
+	archive_set_error(&a->archive, ARCHIVE_ERRNO_FILE_FORMAT,
+	    "Malformed symlink target in entry \"%s\": %s",
+	    pathname, reason);
+	return (ARCHIVE_FAILED);
+}
+
+/*
  * Read header of next entry.
  */
 static int

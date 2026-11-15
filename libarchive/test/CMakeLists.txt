@@ -155,6 +155,7 @@ IF(ENABLE_TEST)
     test_read_format_cpio_svr4_gzip.c
     test_read_format_cpio_svr4_gzip_rpm.c
     test_read_format_cpio_svr4c_Z.c
+    test_read_format_cpio_malformed_symlink.c
     test_read_format_cpio_symlink_trailer.c
     test_read_format_empty.c
     test_read_format_gtar_filename.c
@@ -183,6 +184,7 @@ IF(ENABLE_TEST)
     test_read_format_isozisofs_compress.c
     test_read_format_iso_rockridge_ce_overflow.c
     test_read_format_iso_rockridge_cl_re_cycle.c
+    test_read_format_iso9660_malformed_symlink.c
     test_read_format_iso_rockridge_sl_leak.c
     test_read_format_iso_rockridge_zf_overflow.c
     test_read_format_iso_zisofs_overflow.c
@@ -270,6 +272,7 @@ IF(ENABLE_TEST)
     test_read_format_zip_sfx.c
     test_read_format_zip_size_exceeds_declared.c
     test_read_format_zip_streamable_skip.c
+    test_read_format_zip_malformed_symlink.c
     test_read_format_zip_symlink_unsupported_compression.c
     test_read_format_zip_traditional_encryption_data.c
     test_read_format_zip_uncompressed_size_off_by_4gib.c
