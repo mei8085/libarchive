@@ -223,6 +223,25 @@ used when translating file names.
 .It Cm checkfs
 Allow reading information missing from the mtree from the file system.
 Disabled by default.
+.It Cm root
+Confine every pathname taken from the mtree specification to this
+directory.
+Relative names and
+.Dq ..
+entries are resolved against it, and an absolute name is accepted only
+when the root is itself absolute and contains that name.
+Symbolic link targets and
+.Cm contents
+targets are subject to the same boundary.
+An entry that would leave the root is rejected with
+.Cm ARCHIVE_FAILED
+and a diagnostic, and is not reported as a valid entry.
+The boundary is always enforced: with no root configured it coincides
+with the starting directory, and an empty value resets the root to that
+default rather than disabling the check.
+When
+.Cm checkfs
+is enabled the same root also anchors the backing files it reads.
 .El
 .It Format rar
 .Bl -tag -compact -width indent

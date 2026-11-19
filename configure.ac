@@ -898,7 +898,7 @@ AC_CHECK_FUNCS(m4_flatten([
 	nl_langinfo
 	openat
 	pipe poll posix_spawn posix_spawnp
-	readlink readlinkat readpassphrase
+	readlink readlinkat readpassphrase realpath
 	select setenv setlocale sigaction statfs statvfs
 	strchr strdup strerror strncpy_s strnlen strrchr symlink
 	sysconf

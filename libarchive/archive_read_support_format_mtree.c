@@ -47,6 +47,9 @@
 #ifdef HAVE_CTYPE_H
 #include <ctype.h>
 #endif
+#ifdef HAVE_LIMITS_H
+#include <limits.h>
+#endif
 
 #include "archive.h"
 #include "archive_entry.h"
@@ -97,6 +100,7 @@ struct mtree_entry {
 	char *name;
 	char full;
 	char used;
+	char bad;	/* name had an embedded NUL after unescaping */
 };
 
 struct mtree {
@@ -117,15 +121,49 @@ struct mtree {
 
 	int64_t			 cur_size;
 	char checkfs;
+	char parsed;	/* the manifest has been read into memory */
+	char failed;	/* the manifest parse failed; stay failed */
+
+	/*
+	 * Root confinement.  Every pathname taken from the specification
+	 * is resolved lexically against this root and entries that walk
+	 * above it are rejected.  This applies uniformly to relative
+	 * names, ".." entries, absolute names, symbolic-link targets and
+	 * duplicate lines.  The root is configuration, not per-manifest
+	 * state, so it survives a manifest reset.
+	 *
+	 * An empty root is the default: the boundary is the root of the
+	 * archive namespace.  It does not disable the checks -- ".." can
+	 * never walk above the starting directory.  A non-empty root is a
+	 * prefix used both for anchoring absolute specification paths and
+	 * for looking up backing files when checkfs is enabled.
+	 */
+	struct archive_string	 root;		/* configured content root */
+	struct archive_string	 root_norm;	/* canonical root, no lead "/" */
+
+	/* Scratch buffers reused while resolving paths. */
+	struct archive_string	 scratch;	/* canonicalization output */
+	struct archive_string	 entry_path;	/* canonical entry path */
+	struct archive_string	 rel_path;	/* temporary path assembly */
+	struct archive_string	 base_dir;	/* directory a link is in */
+	struct archive_string	 contents_path;	/* canonical contents target */
+	struct archive_string	 symlink_path;	/* canonical symlink target */
+	struct archive_string	 fs_path;	/* root + relative path */
+	char			 root_set;	/* root option was given */
+	char			 root_absolute;	/* root begins with '/' */
+	char			 root_dir_open;	/* "." root entry awaiting ".." */
 };
 
 static int	bid_keycmp(const char *, const char *, ssize_t);
 static int	cleanup(struct archive_read *);
 static int	detect_form(struct archive_read *, int *);
 static int	mtree_bid(struct archive_read *, int);
+static int	mtree_cmp_node(const struct archive_rb_node *,
+		    const struct archive_rb_node *);
+static int	mtree_cmp_key(const struct archive_rb_node *, const void *);
 static int	parse_file(struct archive_read *, struct archive_entry *,
 		    struct mtree *, struct mtree_entry *, int *);
-static void	parse_escapes(char *, struct mtree_entry *);
+static int	parse_escapes(char *, struct mtree_entry *);
 static int	parse_line(struct archive_read *, struct archive_entry *,
 		    struct mtree *, struct mtree_entry *, int *);
 static int	parse_keyword(struct archive_read *, struct mtree *,
@@ -137,9 +175,24 @@ static int	skip(struct archive_read *a);
 static int	read_header(struct archive_read *,
 		    struct archive_entry *);
 static int64_t	mtree_atol(char **, int base);
+static int	mtree_canonicalize(struct archive_string *, const char *, int *);
+static int	mtree_resolve_path(struct mtree *, const char *,
+		    const char *, struct archive_string *);
+static int	mtree_check_entry(struct archive_read *, struct mtree *,
+		    struct archive_entry *, const char **);
+static int	mtree_check_backing_path(struct archive_read *, struct mtree *,
+		    const char *);
+static const char *mtree_fs_path(struct mtree *, const char *);
+static void	mtree_set_root(struct mtree *, const char *);
+static void	mtree_free_entries(struct mtree_entry *);
+static void	mtree_reset_manifest(struct mtree *);
 #ifndef HAVE_STRNLEN
 static size_t	mtree_strnlen(const char *, size_t);
 #endif
+
+static const struct archive_rb_tree_ops mtree_rb_ops = {
+	mtree_cmp_node, mtree_cmp_key,
+};
 
 #ifdef HAVE_STRNLEN
 #define mtree_strnlen(a,b) strnlen(a,b)
@@ -172,6 +225,16 @@ archive_read_format_mtree_options(struct archive_read *a,
 		}
 		return (ARCHIVE_OK);
 	}
+	if (strcmp(key, "root") == 0) {
+		/*
+		 * Restrict every pathname taken from the specification to
+		 * this directory.  An empty value resets the root to the
+		 * default (the starting directory); the boundary is always
+		 * enforced.
+		 */
+		mtree_set_root(mtree, val);
+		return (ARCHIVE_OK);
+	}
 
 	/* Note: The "warn" return is just to inform the options
 	 * supervisor that we didn't handle it.  It will generate
@@ -189,6 +252,386 @@ free_options(struct mtree_option *head)
 		free(head->value);
 		free(head);
 	}
+}
+
+/*
+ * Root confinement helpers.
+ *
+ * Every pathname that the reader takes from a specification is handled
+ * by the same code, so a single boundary rule covers relative names,
+ * ".." entries, absolute names, symbolic link targets, "contents"
+ * targets and duplicate lines:
+ *
+ *   - The readable namespace is the content root.  With no root
+ *     configured that is the starting directory; with a root configured
+ *     it is the configured directory.  The boundary is never disabled,
+ *     so an empty root option does not widen it.
+ *   - Components are resolved lexically after collapsing repeated and
+ *     trailing separators and "." components, so non-canonical spellings
+ *     cannot be used to slip a ".." past the check.
+ *   - A ".." that would climb above the root, an absolute name that
+ *     cannot be proven to lie inside the root, and a symbolic link or
+ *     contents target that leaves the root are all rejected.
+ */
+
+/*
+ * Lexically canonicalize a '/' separated path.
+ *
+ * The canonical result uses single separators, has no "." components and
+ * no leading or trailing '/'.  The root itself is represented as ".".
+ * ".." components are applied to the components already seen.  For an
+ * absolute input a ".." at the top is clamped at "/" just like the
+ * kernel does; for a relative input it sets *escaped, because it would
+ * climb above the naming root.
+ *
+ * On return *absolute is non-zero if the input began with '/'.
+ * Returns ARCHIVE_FAILED if a relative path climbed above its root.
+ */
+static int
+mtree_canonicalize(struct archive_string *out, const char *path, int *absolute)
+{
+	const char *p, *start;
+	size_t len;
+	int escaped = 0;
+
+	archive_string_empty(out);
+
+	if (absolute != NULL)
+		*absolute = (path != NULL && path[0] == '/');
+
+	p = path;
+	while (p != NULL && *p != '\0') {
+		/* Skip separators (including repeated ones). */
+		while (*p == '/')
+			++p;
+		if (*p == '\0')
+			break;
+		start = p;
+		while (*p != '\0' && *p != '/')
+			++p;
+		len = (size_t)(p - start);
+
+		if (len == 1 && start[0] == '.')
+			continue;
+		if (len == 2 && start[0] == '.' && start[1] == '.') {
+			if (out->length == 0) {
+				if (absolute != NULL && *absolute != 0) {
+					/* Clamped at the filesystem root. */
+					continue;
+				}
+				escaped = 1;
+				continue;
+			}
+			/* Pop the last component. */
+			while (out->length > 0 &&
+			    out->s[out->length - 1] != '/')
+				--out->length;
+			if (out->length > 0)
+				--out->length;
+			out->s[out->length] = '\0';
+			continue;
+		}
+		if (escaped)
+			continue;
+		if (out->length > 0)
+			archive_strappend_char(out, '/');
+		archive_strncat(out, start, len);
+	}
+	if (out->length == 0)
+		archive_strcpy(out, ".");
+	return (escaped ? ARCHIVE_FAILED : ARCHIVE_OK);
+}
+
+/*
+ * Return non-zero if the canonical path `cand' lies inside the canonical
+ * directory `root' (both are relative-to-"/" forms as produced by
+ * mtree_canonicalize, where "." means "/").  When it does, *rel is set to
+ * the part below root (or "." when cand is root itself).
+ */
+static int
+mtree_path_inside(const char *cand, const char *root, const char **rel)
+{
+	size_t len;
+
+	if (strcmp(root, ".") == 0) {
+		/* root is "/", so everything is inside. */
+		if (rel != NULL)
+			*rel = cand;
+		return (1);
+	}
+	if (strcmp(cand, root) == 0) {
+		if (rel != NULL)
+			*rel = ".";
+		return (1);
+	}
+	len = strlen(root);
+	if (strncmp(cand, root, len) == 0 && cand[len] == '/') {
+		if (rel != NULL)
+			*rel = cand + len + 1;
+		return (1);
+	}
+	return (0);
+}
+
+/*
+ * Resolve `path' against `base' and confine it to the content root.
+ *
+ * `base' is a directory name relative to the content root ("" or "."
+ * means the root itself); relative paths are resolved against it.
+ * Absolute paths are only accepted when the configured root is itself
+ * absolute and the path lies lexically inside it.
+ *
+ * On success `out' holds the canonical path relative to the content
+ * root ("." for the root itself) and ARCHIVE_OK is returned.  An empty
+ * `path' denotes the root.  Returns ARCHIVE_FAILED when the path leaves
+ * the content root; the caller supplies the diagnostic.
+ */
+static int
+mtree_resolve_path(struct mtree *mtree, const char *path, const char *base,
+    struct archive_string *out)
+{
+	int absolute, r;
+	const char *rel;
+
+	if (path == NULL || path[0] == '\0') {
+		archive_strcpy(out, ".");
+		return (ARCHIVE_OK);
+	}
+
+	if (path[0] == '/') {
+		/* Absolute: only meaningful inside an absolute root. */
+		if (!mtree->root_absolute)
+			return (ARCHIVE_FAILED);
+		r = mtree_canonicalize(&mtree->scratch, path, &absolute);
+		if (r != ARCHIVE_OK)
+			return (r);
+		if (!mtree_path_inside(mtree->scratch.s, mtree->root_norm.s,
+		    &rel))
+			return (ARCHIVE_FAILED);
+		archive_strcpy(out, rel);
+		return (ARCHIVE_OK);
+	}
+
+	/*
+	 * Relative: canonicalize base + "/" + path in one pass.  Doing it
+	 * in a single pass is important: it means ".." in the name can
+	 * cancel components of the base and still be checked against the
+	 * root as a whole.
+	 */
+	archive_string_empty(&mtree->rel_path);
+	if (base != NULL && base[0] != '\0' && strcmp(base, ".") != 0)
+		archive_strcat(&mtree->rel_path, base);
+	if (mtree->rel_path.length > 0)
+		archive_strappend_char(&mtree->rel_path, '/');
+	archive_strcat(&mtree->rel_path, path);
+	r = mtree_canonicalize(&mtree->scratch, mtree->rel_path.s, &absolute);
+	if (r != ARCHIVE_OK)
+		return (r);
+	archive_strcpy(out, mtree->scratch.s);
+	return (ARCHIVE_OK);
+}
+
+/*
+ * Build the on-disk path used to look up backing content when checkfs is
+ * enabled.  `rel' is a canonical path relative to the content root.
+ */
+static const char *
+mtree_fs_path(struct mtree *mtree, const char *rel)
+{
+	archive_string_empty(&mtree->fs_path);
+	if (!mtree->root_set) {
+		archive_strcat(&mtree->fs_path, rel);
+		return (mtree->fs_path.s);
+	}
+	archive_strcat(&mtree->fs_path, mtree->root.s);
+	if (strcmp(rel, ".") != 0) {
+		size_t n = mtree->fs_path.length;
+		if (n == 0 || mtree->fs_path.s[n - 1] != '/')
+			archive_strappend_char(&mtree->fs_path, '/');
+		archive_strcat(&mtree->fs_path, rel);
+	}
+	return (mtree->fs_path.s);
+}
+
+/*
+ * Defense in depth for checkfs: verify that an existing backing object,
+ * after every symbolic link it crosses is followed, really lives under
+ * the content root.  The lexical confinement above is what rejects
+ * malicious specification text; this catches a hostile *backing tree*
+ * whose symlink would otherwise redirect the open() somewhere else.
+ *
+ * A path that does not exist is an ordinary miss left to the caller.
+ * Returns ARCHIVE_FAILED (with a diagnostic) only when the object
+ * exists and resolves outside the root.
+ */
+#if defined(HAVE_REALPATH) && defined(PATH_MAX)
+static int
+mtree_check_backing_path(struct archive_read *a, struct mtree *mtree,
+    const char *path)
+{
+	char real_root[PATH_MAX];
+	char real_path[PATH_MAX];
+	const char *root;
+	size_t len;
+	if (path == NULL || realpath(path, real_path) == NULL)
+		return (ARCHIVE_OK);	/* Ordinary miss. */
+
+	root = mtree->root_set ? mtree->root.s : ".";
+	if (realpath(root, real_root) == NULL)
+		return (ARCHIVE_OK);
+
+	if (strcmp(real_root, "/") == 0)
+		return (ARCHIVE_OK);
+	len = strlen(real_root);
+	if (strncmp(real_path, real_root, len) == 0 &&
+	    (real_path[len] == '\0' || real_path[len] == '/'))
+		return (ARCHIVE_OK);
+
+	archive_set_error(&a->archive, ARCHIVE_ERRNO_MISC,
+	    "Contents path \"%s\" resolves outside the content root", path);
+	return (ARCHIVE_FAILED);
+}
+#else
+static int
+mtree_check_backing_path(struct archive_read *a, struct mtree *mtree,
+    const char *path)
+{
+	(void)a; (void)mtree; (void)path;
+	return (ARCHIVE_OK);
+}
+#endif
+
+/*
+ * Configure the content root.  The option value is canonicalized once so
+ * that later containment checks only have to compare plain strings.  An
+ * empty value clears the configured root; the boundary itself stays in
+ * force (it then coincides with the starting directory).
+ */
+static void
+mtree_set_root(struct mtree *mtree, const char *val)
+{
+	int absolute = 0;
+
+	archive_string_empty(&mtree->root);
+	archive_string_empty(&mtree->root_norm);
+	mtree->root_set = 0;
+	mtree->root_absolute = 0;
+
+	if (val == NULL || val[0] == '\0')
+		return;
+
+	if (mtree_canonicalize(&mtree->root_norm, val, &absolute) != ARCHIVE_OK)
+		return;
+
+	mtree->root_set = 1;
+	mtree->root_absolute = absolute != 0;
+	if (absolute) {
+		archive_strcpy(&mtree->root, "/");
+		if (strcmp(mtree->root_norm.s, ".") != 0)
+			archive_strcat(&mtree->root, mtree->root_norm.s);
+	} else {
+		archive_strcpy(&mtree->root, mtree->root_norm.s);
+	}
+}
+
+/*
+ * Validate every pathname carried by an entry and cache the canonical
+ * entry path.  Returns ARCHIVE_FAILED when the entry must be rejected.
+ */
+static int
+mtree_check_entry(struct archive_read *a, struct mtree *mtree,
+    struct archive_entry *entry, const char **canonical)
+{
+	const char *pathname = archive_entry_pathname(entry);
+	const char *link = archive_entry_symlink(entry);
+	int r;
+
+	r = mtree_resolve_path(mtree, pathname, "", &mtree->entry_path);
+	if (r != ARCHIVE_OK) {
+		archive_set_error(&a->archive, ARCHIVE_ERRNO_MISC,
+		    "Pathname \"%s\" is outside the content root",
+		    pathname != NULL ? pathname : "");
+		return (ARCHIVE_FAILED);
+	}
+	*canonical = mtree->entry_path.s;
+
+	if (link != NULL && link[0] != '\0') {
+		/* Resolve the target against the directory the link is in. */
+		archive_strcpy(&mtree->base_dir, mtree->entry_path.s);
+		archive_string_dirname(&mtree->base_dir);
+		if (strcmp(mtree->base_dir.s, "/") == 0)
+			archive_strcpy(&mtree->base_dir, ".");
+		r = mtree_resolve_path(mtree, link, mtree->base_dir.s,
+		    &mtree->symlink_path);
+		if (r != ARCHIVE_OK) {
+			archive_set_error(&a->archive, ARCHIVE_ERRNO_MISC,
+			    "Symbolic link target \"%s\" is outside the"
+			    " content root", link);
+			return (ARCHIVE_FAILED);
+		}
+	}
+
+	if (archive_strlen(&mtree->contents_name) > 0) {
+		/*
+		 * "contents" names a backing file relative to the content
+		 * root, not to the entry's directory.
+		 */
+		r = mtree_resolve_path(mtree, mtree->contents_name.s, "",
+		    &mtree->contents_path);
+		if (r != ARCHIVE_OK) {
+			archive_set_error(&a->archive, ARCHIVE_ERRNO_MISC,
+			    "Contents path \"%s\" is outside the content root",
+			    mtree->contents_name.s);
+			return (ARCHIVE_FAILED);
+		}
+	}
+
+	return (ARCHIVE_OK);
+}
+
+static void
+mtree_free_entries(struct mtree_entry *head)
+{
+	struct mtree_entry *p, *q;
+
+	for (p = head; p != NULL; p = q) {
+		q = p->next;
+		free(p->name);
+		free_options(p->options);
+		free(p);
+	}
+}
+
+/*
+ * Drop all state that belongs to one manifest so that a manifest parsed
+ * after a failure starts from a clean root-directory context: no
+ * entries, no duplicate-line index, no current directory, no pending
+ * hardlink state and no open contents file.  The configured content
+ * root is configuration, so it is deliberately kept.
+ */
+static void
+mtree_reset_manifest(struct mtree *mtree)
+{
+	if (mtree->fd >= 0) {
+		close(mtree->fd);
+		mtree->fd = -1;
+	}
+	mtree_free_entries(mtree->entries);
+	mtree->entries = NULL;
+	mtree->this_entry = NULL;
+	archive_string_empty(&mtree->current_dir);
+	archive_string_empty(&mtree->contents_name);
+	archive_string_empty(&mtree->contents_path);
+	archive_string_empty(&mtree->symlink_path);
+	archive_string_empty(&mtree->base_dir);
+	archive_string_empty(&mtree->entry_path);
+	archive_entry_linkresolver_free(mtree->resolver);
+	mtree->resolver = NULL;
+	__archive_rb_tree_init(&mtree->rbtree, &mtree_rb_ops);
+	mtree->cur_size = 0;
+	mtree->offset = 0;
+	mtree->parsed = 0;
+	mtree->root_dir_open = 0;
 }
 
 static int
@@ -212,9 +655,6 @@ mtree_cmp_key(const struct archive_rb_node *n, const void *key)
 int
 archive_read_support_format_mtree(struct archive *_a)
 {
-	static const struct archive_rb_tree_ops rb_ops = {
-		mtree_cmp_node, mtree_cmp_key,
-	};
 	struct archive_read *a = (struct archive_read *)_a;
 	struct mtree *mtree;
 	int r;
@@ -230,7 +670,7 @@ archive_read_support_format_mtree(struct archive *_a)
 	mtree->checkfs = 0;
 	mtree->fd = -1;
 
-	__archive_rb_tree_init(&mtree->rbtree, &rb_ops);
+	__archive_rb_tree_init(&mtree->rbtree, &mtree_rb_ops);
 
 	r = __archive_read_register_format(a,
 	    mtree,
@@ -245,8 +685,18 @@ archive_read_support_format_mtree(struct archive *_a)
 	    NULL,
 	    NULL);
 
-	if (r != ARCHIVE_OK)
+	if (r != ARCHIVE_OK) {
+		archive_string_free(&mtree->root);
+		archive_string_free(&mtree->root_norm);
+		archive_string_free(&mtree->scratch);
+		archive_string_free(&mtree->entry_path);
+		archive_string_free(&mtree->rel_path);
+		archive_string_free(&mtree->base_dir);
+		archive_string_free(&mtree->contents_path);
+		archive_string_free(&mtree->symlink_path);
+		archive_string_free(&mtree->fs_path);
 		free(mtree);
+	}
 	return (r);
 }
 
@@ -254,25 +704,20 @@ static int
 cleanup(struct archive_read *a)
 {
 	struct mtree *mtree = a->format->data;
-	struct mtree_entry *p, *q;
 
-	/* Close any dangling file descriptor before freeing */
-    if (mtree->fd >= 0) {
-        close(mtree->fd);
-        mtree->fd = -1;
-    }
-	p = mtree->entries;
-	while (p != NULL) {
-		q = p->next;
-		free(p->name);
-		free_options(p->options);
-		free(p);
-		p = q;
-	}
+	mtree_reset_manifest(mtree);
 	archive_string_free(&mtree->line);
 	archive_string_free(&mtree->current_dir);
 	archive_string_free(&mtree->contents_name);
-	archive_entry_linkresolver_free(mtree->resolver);
+	archive_string_free(&mtree->contents_path);
+	archive_string_free(&mtree->symlink_path);
+	archive_string_free(&mtree->root);
+	archive_string_free(&mtree->root_norm);
+	archive_string_free(&mtree->scratch);
+	archive_string_free(&mtree->entry_path);
+	archive_string_free(&mtree->rel_path);
+	archive_string_free(&mtree->base_dir);
+	archive_string_free(&mtree->fs_path);
 
 	free(mtree->buff);
 	free(mtree);
@@ -895,6 +1340,7 @@ process_add_entry(struct archive_read *a, struct mtree *mtree,
 	entry->name = NULL;
 	entry->used = 0;
 	entry->full = 0;
+	entry->bad = 0;
 
 	/* Add this entry to list. */
 	if (*last_entry == NULL)
@@ -1083,15 +1529,43 @@ read_header(struct archive_read *a, struct archive_entry *entry)
 		mtree->fd = -1;
 	}
 
+	/* A manifest that failed to parse stays failed. */
+	if (mtree->failed) {
+		archive_set_error(&a->archive, ARCHIVE_ERRNO_FILE_FORMAT,
+		    "mtree specification was rejected");
+		return (ARCHIVE_FATAL);
+	}
+
 	if (mtree->entries == NULL) {
+		/* An empty manifest yields no entries. */
+		if (mtree->parsed)
+			return (ARCHIVE_EOF);
+		/*
+		 * Start every manifest from a clean root-directory
+		 * context: whatever a previous manifest left behind
+		 * (entries, the duplicate-line index, the current
+		 * directory, the open contents file, the hardlink
+		 * resolver) must not leak into this one.
+		 */
+		mtree_reset_manifest(mtree);
 		mtree->resolver = archive_entry_linkresolver_new();
 		if (mtree->resolver == NULL)
 			return ARCHIVE_FATAL;
 		archive_entry_linkresolver_set_strategy(mtree->resolver,
 		    ARCHIVE_FORMAT_MTREE);
 		r = read_mtree(a, mtree);
-		if (r != ARCHIVE_OK)
+		if (r != ARCHIVE_OK) {
+			/*
+			 * Drop the partially parsed manifest so a retry
+			 * (or a later manifest) cannot observe half-built
+			 * state, and remember that this one is unusable.
+			 */
+			mtree_reset_manifest(mtree);
+			mtree->failed = 1;
 			return (r);
+		}
+		mtree->parsed = 1;
+		mtree->this_entry = mtree->entries;
 	}
 
 	a->archive.archive_format = mtree->archive_format;
@@ -1102,12 +1576,32 @@ read_header(struct archive_read *a, struct archive_entry *entry)
 			return (ARCHIVE_EOF);
 		if (strcmp(mtree->this_entry->name, "..") == 0) {
 			mtree->this_entry->used = 1;
-			if (archive_strlen(&mtree->current_dir) > 0) {
-				/* Roll back current path. */
-				archive_string_dirname(&mtree->current_dir);
-				if (strcmp(mtree->current_dir.s, ".") == 0)
-					archive_string_empty(&mtree->current_dir);
+			if (archive_strlen(&mtree->current_dir) == 0) {
+				/*
+				 * At the content root a ".." leaves the
+				 * readable namespace, unless it closes a
+				 * root directory the manifest itself
+				 * opened ("." followed by "..").  The
+				 * closing form is what mtree writers
+				 * emit and it stays at the root.
+				 */
+				if (mtree->root_dir_open) {
+					mtree->root_dir_open = 0;
+					mtree->this_entry =
+					    mtree->this_entry->next;
+					continue;
+				}
+				archive_set_error(&a->archive,
+				    ARCHIVE_ERRNO_MISC,
+				    "Pathname \"..\" is outside the content"
+				    " root");
+				mtree->this_entry = mtree->this_entry->next;
+				return (ARCHIVE_FAILED);
 			}
+			/* Roll back current path. */
+			archive_string_dirname(&mtree->current_dir);
+			if (strcmp(mtree->current_dir.s, ".") == 0)
+				archive_string_empty(&mtree->current_dir);
 		}
 		if (!mtree->this_entry->used) {
 			use_next = 0;
@@ -1129,10 +1623,12 @@ static int
 parse_file(struct archive_read *a, struct archive_entry *entry,
     struct mtree *mtree, struct mtree_entry *mentry, int *use_next)
 {
+	const char *canonical;
 	const char *path;
 	la_seek_stat_t st_storage, *st;
 	struct mtree_entry *mp;
 	struct archive_entry *sparse_entry;
+	size_t saved_dir_len;
 	int r = ARCHIVE_OK, r1, parsed_kws;
 
 	mentry->used = 1;
@@ -1141,11 +1637,13 @@ parse_file(struct archive_read *a, struct archive_entry *entry,
 	archive_entry_set_filetype(entry, AE_IFREG);
 	archive_entry_set_size(entry, 0);
 	archive_string_empty(&mtree->contents_name);
+	archive_string_empty(&mtree->contents_path);
 
 	/* Parse options from this line. */
 	parsed_kws = 0;
 	r = parse_line(a, entry, mtree, mentry, &parsed_kws);
 
+	saved_dir_len = archive_strlen(&mtree->current_dir);
 	if (mentry->full) {
 		archive_entry_copy_pathname(entry, mentry->name);
 		/*
@@ -1164,6 +1662,14 @@ parse_file(struct archive_read *a, struct archive_entry *entry,
 			if (mp->full && !mp->used) {
 				/* Later lines override earlier ones. */
 				mp->used = 1;
+				/*
+				 * Every merged line is subject to the same
+				 * boundary; a line carrying a NUL in its
+				 * link/contents target invalidates the
+				 * merged entry.
+				 */
+				if (mp->bad)
+					mentry->bad = 1;
 				r1 = parse_line(a, entry, mtree, mp, &parsed_kws);
 				if (r1 < r)
 					r = r1;
@@ -1184,6 +1690,48 @@ parse_file(struct archive_read *a, struct archive_entry *entry,
 			mtree->current_dir.length = n;
 	}
 
+	/*
+	 * Apply the boundary rule to everything the line named: the
+	 * entry pathname, a symbolic link's target and the contents
+	 * target.  An entry that leaves the content root is rejected as
+	 * a whole; it is never partially reported.  Under checkfs this
+	 * also makes sure the backing file lookup cannot be steered out
+	 * of the root.
+	 */
+	if (mentry->bad) {
+		archive_set_error(&a->archive, ARCHIVE_ERRNO_MISC,
+		    "Pathname contains an embedded NUL character");
+		mtree->current_dir.length = saved_dir_len;
+		if (mtree->current_dir.s != NULL)
+			mtree->current_dir.s[saved_dir_len] = '\0';
+		*use_next = 0;
+		return (ARCHIVE_FAILED);
+	}
+	if (mtree_check_entry(a, mtree, entry, &canonical) != ARCHIVE_OK) {
+		/*
+		 * A rejected directory must not become the current
+		 * directory: rewind so the next entry is resolved from
+		 * the same context as if this line had not been seen.
+		 */
+		mtree->current_dir.length = saved_dir_len;
+		if (mtree->current_dir.s != NULL)
+			mtree->current_dir.s[saved_dir_len] = '\0';
+		*use_next = 0;
+		return (ARCHIVE_FAILED);
+	}
+
+	/*
+	 * mtree writers close the root directory with a trailing "..".
+	 * Remember that the root was opened so that such a closing entry
+	 * (which returns to the root rather than leaving it) is accepted.
+	 * The state is part of the root-directory context: a manifest
+	 * that fails to parse must not leave it set for the next one.
+	 */
+	if (mentry->full && strcmp(mtree->entry_path.s, ".") == 0 &&
+	    archive_entry_filetype(entry) == AE_IFDIR &&
+	    archive_strlen(&mtree->current_dir) == 0)
+		mtree->root_dir_open = 1;
+
 	if (mtree->checkfs) {
 		/*
 		 * Try to open and stat the file to get the real size
@@ -1198,9 +1746,24 @@ parse_file(struct archive_read *a, struct archive_entry *entry,
 		 */
 		mtree->fd = -1;
 		if (archive_strlen(&mtree->contents_name) > 0)
-			path = mtree->contents_name.s;
+			path = mtree_fs_path(mtree, mtree->contents_path.s);
 		else
-			path = archive_entry_pathname(entry);
+			path = mtree_fs_path(mtree, canonical);
+
+		/*
+		 * The name itself is already confined lexically.  For the
+		 * types we open() (and therefore follow), also make sure
+		 * the backing object it names -- after any symbolic links
+		 * stored in the backing tree -- is still inside the root.
+		 * Symlink entries are only lstat()ed, so their backing
+		 * link is not followed here.
+		 */
+		if ((archive_entry_filetype(entry) == AE_IFREG ||
+		    archive_entry_filetype(entry) == AE_IFDIR) &&
+		    mtree_check_backing_path(a, mtree, path) != ARCHIVE_OK) {
+			*use_next = 0;
+			return (ARCHIVE_FAILED);
+		}
 
 		if (archive_entry_filetype(entry) == AE_IFREG ||
 				archive_entry_filetype(entry) == AE_IFDIR) {
@@ -1376,18 +1939,29 @@ parse_line(struct archive_read *a, struct archive_entry *entry,
     struct mtree *mtree, struct mtree_entry *mp, int *parsed_kws)
 {
 	struct mtree_option *iter;
-	int r = ARCHIVE_OK, r1;
+	int r = ARCHIVE_OK, r1, rwarn = 0;
 
 	for (iter = mp->options; iter != NULL; iter = iter->next) {
 		r1 = parse_keyword(a, mtree, entry, iter, parsed_kws);
-		if (r1 < r)
+		if (r1 < r) {
 			r = r1;
+			if (r1 == ARCHIVE_WARN)
+				rwarn = 1;
+		}
 	}
 	if (r == ARCHIVE_OK && (*parsed_kws & MTREE_HAS_TYPE) == 0) {
 		archive_set_error(&a->archive, ARCHIVE_ERRNO_FILE_FORMAT,
 		    "Missing type keyword in mtree specification");
 		return (ARCHIVE_WARN);
 	}
+	/*
+	 * A keyword rejected for a reason that carries no message of its
+	 * own (for example a link/contents target with an embedded NUL)
+	 * must still be diagnosable.
+	 */
+	if (rwarn && archive_error_string(&a->archive) == NULL)
+		archive_set_error(&a->archive, ARCHIVE_ERRNO_FILE_FORMAT,
+		    "Invalid keyword value in mtree specification");
 	return (r);
 }
 
@@ -1594,7 +2168,12 @@ parse_keyword(struct archive_read *a, struct mtree *mtree,
 	case 'c':
 		if (strcmp(key, "content") == 0
 		    || strcmp(key, "contents") == 0) {
-			parse_escapes(val, NULL);
+			if (parse_escapes(val, NULL) != ARCHIVE_OK) {
+				archive_set_error(&a->archive,
+				    ARCHIVE_ERRNO_FILE_FORMAT,
+				    "Contents target contains an embedded NUL");
+				return (ARCHIVE_FAILED);
+			}
 			archive_strcpy(&mtree->contents_name, val);
 			return (ARCHIVE_OK);
 		}
@@ -1642,7 +2221,12 @@ parse_keyword(struct archive_read *a, struct mtree *mtree,
 		break;
 	case 'l':
 		if (strcmp(key, "link") == 0) {
-			parse_escapes(val, NULL);
+			if (parse_escapes(val, NULL) != ARCHIVE_OK) {
+				archive_set_error(&a->archive,
+				    ARCHIVE_ERRNO_FILE_FORMAT,
+				    "Symbolic link target contains an embedded NUL");
+				return (ARCHIVE_FAILED);
+			}
 			archive_entry_copy_symlink(entry, val);
 			return (ARCHIVE_OK);
 		}
@@ -1894,11 +2478,12 @@ skip(struct archive_read *a)
  * Since parsing backslash sequences always makes strings shorter,
  * we can always do this conversion in-place.
  */
-static void
+static int
 parse_escapes(char *src, struct mtree_entry *mentry)
 {
 	char *dest = src;
 	char c;
+	int bad = 0;
 
 	if (mentry != NULL && strcmp(src, ".") == 0)
 		mentry->full = 1;
@@ -1965,9 +2550,23 @@ parse_escapes(char *src, struct mtree_entry *mentry)
 				break;
 			}
 		}
+		/*
+		 * A NUL cannot appear in a pathname or in a link/contents
+		 * target: it would silently hide the rest of the text from
+		 * every check that follows.  Record it instead of writing
+		 * it, so the entry can be rejected with a diagnostic.
+		 */
+		if (c == '\0') {
+			if (mentry != NULL)
+				mentry->bad = 1;
+			else
+				bad = 1;
+			continue;
+		}
 		*dest++ = c;
 	}
 	*dest = '\0';
+	return (bad ? ARCHIVE_FAILED : ARCHIVE_OK);
 }
 
 /* Parse a hex digit. */

@@ -573,6 +573,7 @@ libarchive_test_SOURCES= \
 	libarchive/test/test_read_format_mtree.c \
 	libarchive/test/test_read_format_mtree_crash747.c \
 	libarchive/test/test_read_format_mtree_size.c \
+	libarchive/test/test_read_format_mtree_root.c \
 	libarchive/test/test_read_format_pax_bz2.c \
 	libarchive/test/test_read_format_rar.c \
 	libarchive/test/test_read_format_rar_encryption.c \

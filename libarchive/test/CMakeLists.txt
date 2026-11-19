@@ -196,6 +196,7 @@ IF(ENABLE_TEST)
     test_read_format_mtree.c
     test_read_format_mtree_crash747.c
     test_read_format_mtree_size.c
+    test_read_format_mtree_root.c
     test_read_format_pax_bz2.c
     test_read_format_rar.c
     test_read_format_rar_encryption.c
